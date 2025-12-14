@@ -1,0 +1,146 @@
+---
+title: "Phase 0: Project Setup and Environment Configuration"
+author: "Fraud Detection Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+    highlight: tango
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+# Set working directory to project root (assuming Rmd is in analysis/)
+if (basename(getwd()) == "analysis") {
+  setwd("..")
+}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.path = "results/figures/00_setup-",
+  cache = TRUE
+)
+```
+
+## Introduction
+
+This document sets up the R environment for the fraud detection project, ensuring reproducibility and proper package management.
+
+## Set Random Seed
+
+```{r set-seed}
+# Set random seed for reproducibility
+set.seed(42)
+cat("Random seed set to: 42\n")
+```
+
+## Load Setup Script
+
+```{r load-setup}
+# Source the setup script
+source("R/setup.R")
+```
+
+## R Session Information
+
+```{r session-info}
+# Display R version and platform information
+cat("=== R Session Info ===\n")
+cat("R version:", R.version.string, "\n")
+cat("Platform:", R.version$platform, "\n")
+cat("Date:", Sys.Date(), "\n\n")
+```
+
+## Package Versions
+
+```{r package-versions}
+# Print versions of key packages
+print_package_versions()
+```
+
+## Cost Matrix Definition
+
+For fraud detection, we can define a cost matrix to evaluate models based on business impact:
+
+- **True Positive (TP)**: Correctly identified fraud - Cost: 0 (saved money)
+- **False Positive (FP)**: Legitimate transaction flagged - Cost: Investigation cost (e.g., $10)
+- **False Negative (FN)**: Missed fraud - Cost: Average fraud amount (e.g., $100)
+- **True Negative (TN)**: Correctly identified legitimate transaction - Cost: 0
+
+```{r cost-matrix}
+# Define cost matrix
+cost_matrix <- list(
+  TP = 0,      # True Positive: Fraud caught (no cost, money saved)
+  FP = 10,     # False Positive: Investigation cost
+  FN = 100,    # False Negative: Average fraud amount lost
+  TN = 0       # True Negative: Correct transaction (no cost)
+)
+
+cat("=== Cost Matrix ===\n")
+cat("True Positive (TP):  $", cost_matrix$TP, "\n")
+cat("False Positive (FP): $", cost_matrix$FP, "\n")
+cat("False Negative (FN): $", cost_matrix$FN, "\n")
+cat("True Negative (TN):  $", cost_matrix$TN, "\n")
+```
+
+## Project Structure Verification
+
+```{r verify-structure}
+# Verify that all necessary directories exist
+required_dirs <- c(
+  paths$data,
+  paths$analysis,
+  paths$results,
+  paths$figures,
+  paths$tables,
+  paths$models,
+  paths$R
+)
+
+cat("=== Directory Structure ===\n")
+for (dir in required_dirs) {
+  exists <- dir.exists(dir)
+  status <- ifelse(exists, "✓", "✗")
+  cat(sprintf("%s %s\n", status, dir))
+}
+```
+
+## Data File Check
+
+```{r check-data}
+# Check if the credit card dataset exists
+data_file <- file.path(paths$data, "creditcard.csv")
+if (file.exists(data_file)) {
+  file_info <- file.info(data_file)
+  cat("=== Data File Found ===\n")
+  cat("File:", data_file, "\n")
+  cat("Size:", round(file_info$size / 1024^2, 2), "MB\n")
+  cat("Last modified:", file_info$mtime, "\n")
+  
+  # Quick peek at data structure
+  cat("\n=== Quick Data Preview ===\n")
+  sample_data <- read_csv(data_file, n_max = 5, show_col_types = FALSE)
+  print(sample_data)
+} else {
+  cat("WARNING: Data file not found at", data_file, "\n")
+  cat("Please ensure creditcard.csv is in the data/ directory.\n")
+}
+```
+
+## Summary
+
+- ✓ Random seed set for reproducibility
+- ✓ All required packages loaded
+- ✓ Project paths configured
+- ✓ Results directories created
+- ✓ Cost matrix defined
+- ✓ Environment ready for analysis
+
+**Next Step**: Proceed to `01_eda.Rmd` for Exploratory Data Analysis.
+

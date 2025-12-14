@@ -1,0 +1,51 @@
+# Data files (too large for GitHub)
+data/*.csv
+data/*.rds
+data/*.xlsx
+data/*.xls
+
+# But keep the data directory structure
+!data/.gitkeep
+!data/README.md
+
+# R specific
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+*.Rproj.user/
+.Rproj
+
+# Results and outputs (can be regenerated)
+results/figures/*
+results/tables/*
+results/models/*
+!results/.gitkeep
+
+# Model files (can be large)
+models/*.rds
+models/*.rda
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.log
+
+# R Markdown cache
+*_cache/
+*.html
+
+# Environment files
+.Renviron
+.env
+

@@ -14,9 +14,24 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-# Set working directory to project root (assuming Rmd is in analysis/)
-if (basename(getwd()) == "analysis") {
-  setwd("..")
+# Determine project root directory
+# When R Markdown renders, it runs from the directory containing the Rmd file
+current_dir <- getwd()
+if (basename(current_dir) == "analysis") {
+  # We're in analysis/, go up one level to project root
+  project_root <- dirname(current_dir)
+  setwd(project_root)
+} else {
+  # Already in project root or somewhere else
+  project_root <- current_dir
+}
+
+# Source the setup script
+setup_file <- file.path(project_root, "R", "setup.R")
+if (file.exists(setup_file)) {
+  source(setup_file)
+} else {
+  stop("Cannot find setup.R at: ", setup_file)
 }
 
 knitr::opts_chunk$set(
@@ -38,13 +53,6 @@ This document sets up the R environment for the fraud detection project, ensurin
 # Set random seed for reproducibility
 set.seed(42)
 cat("Random seed set to: 42\n")
-```
-
-## Load Setup Script
-
-```{r load-setup}
-# Source the setup script
-source("R/setup.R")
 ```
 
 ## R Session Information

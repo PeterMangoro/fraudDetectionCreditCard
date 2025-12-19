@@ -1,0 +1,455 @@
+---
+title: "Phase 1: Exploratory Data Analysis"
+author: "Fraud Detection Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+    highlight: tango
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+# Determine project root directory
+current_dir <- getwd()
+if (basename(current_dir) == "analysis") {
+  project_root <- dirname(current_dir)
+  setwd(project_root)
+} else {
+  project_root <- current_dir
+}
+
+# Source the setup script
+setup_file <- file.path(project_root, "R", "setup.R")
+if (file.exists(setup_file)) {
+  source(setup_file)
+} else {
+  stop("Cannot find setup.R at: ", setup_file)
+}
+
+# Set random seed for reproducibility
+set.seed(42)
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.path = "results/figures/01_eda-",
+  cache = TRUE
+)
+```
+
+## Introduction
+
+This document performs comprehensive Exploratory Data Analysis (EDA) on the credit card fraud detection dataset. The goal is to understand the data structure, identify patterns, detect anomalies, and quantify the class imbalance that characterizes fraud detection problems.
+
+## Load Data
+
+```{r load-data}
+# Load the credit card dataset
+data_file <- file.path(paths$data, "creditcard.csv")
+
+if (!file.exists(data_file)) {
+  stop("Data file not found at: ", data_file)
+}
+
+# Read the data
+cat("Loading data from:", data_file, "\n")
+df <- read_csv(data_file, show_col_types = FALSE)
+
+cat("Data loaded successfully!\n")
+cat("Dimensions:", nrow(df), "rows ×", ncol(df), "columns\n")
+```
+
+## Data Overview
+
+```{r data-overview}
+# Display basic information about the dataset
+cat("=== Dataset Overview ===\n")
+cat("Number of observations:", nrow(df), "\n")
+cat("Number of features:", ncol(df), "\n")
+cat("\n")
+
+# Display column names
+cat("=== Column Names ===\n")
+print(colnames(df))
+cat("\n")
+
+# Display first few rows
+cat("=== First 5 Rows ===\n")
+print(head(df, 5))
+cat("\n")
+
+# Display data types
+cat("=== Data Types ===\n")
+print(str(df))
+```
+
+## Class Distribution Analysis
+
+```{r class-distribution}
+# Analyze class distribution
+class_counts <- df %>%
+  count(Class) %>%
+  mutate(
+    Percentage = round(n / sum(n) * 100, 4),
+    Label = ifelse(Class == 0, "Non-Fraud", "Fraud")
+  )
+
+cat("=== Class Distribution ===\n")
+print(class_counts)
+cat("\n")
+
+# Calculate imbalance ratio
+fraud_count <- sum(df$Class == 1)
+non_fraud_count <- sum(df$Class == 0)
+imbalance_ratio <- non_fraud_count / fraud_count
+
+cat("Imbalance Ratio (Non-Fraud : Fraud):", round(imbalance_ratio, 2), ": 1\n")
+cat("This means there are", round(imbalance_ratio), "non-fraudulent transactions for every fraudulent one.\n")
+```
+
+### Class Distribution Visualization
+
+```{r class-distribution-plot}
+# Create bar chart for class distribution
+p1 <- df %>%
+  mutate(Class = factor(Class, levels = c(0, 1), labels = c("Non-Fraud", "Fraud"))) %>%
+  ggplot(aes(x = Class, fill = Class)) +
+  geom_bar(alpha = 0.7) +
+  scale_fill_manual(values = c("Non-Fraud" = "#2ecc71", "Fraud" = "#e74c3c")) +
+  labs(
+    title = "Class Distribution",
+    subtitle = paste("Total:", nrow(df), "transactions"),
+    x = "Transaction Type",
+    y = "Count"
+  ) +
+  theme(legend.position = "none") +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5)
+
+print(p1)
+
+# Create pie chart
+p2 <- class_counts %>%
+  ggplot(aes(x = "", y = n, fill = Label)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  scale_fill_manual(values = c("Non-Fraud" = "#2ecc71", "Fraud" = "#e74c3c")) +
+  labs(
+    title = "Class Distribution (Percentage)",
+    fill = "Class"
+  ) +
+  theme_void() +
+  geom_text(aes(label = paste0(Percentage, "%")), 
+            position = position_stack(vjust = 0.5))
+
+print(p2)
+```
+
+## Data Quality Checks
+
+### Missing Values
+
+```{r missing-values}
+# Check for missing values
+missing_summary <- df %>%
+  summarise_all(~ sum(is.na(.))) %>%
+  gather(key = "Variable", value = "Missing_Count") %>%
+  filter(Missing_Count > 0)
+
+if (nrow(missing_summary) == 0) {
+  cat("✓ No missing values found in the dataset.\n")
+} else {
+  cat("⚠ Missing values detected:\n")
+  print(missing_summary)
+}
+```
+
+### Duplicate Detection
+
+```{r duplicates}
+# Check for duplicate rows
+duplicate_count <- sum(duplicated(df))
+
+cat("=== Duplicate Detection ===\n")
+cat("Number of duplicate rows:", duplicate_count, "\n")
+cat("Percentage of duplicates:", round(duplicate_count / nrow(df) * 100, 4), "%\n")
+
+if (duplicate_count > 0) {
+  cat("⚠ Warning: Duplicate rows found. Consider removing them.\n")
+} else {
+  cat("✓ No duplicate rows found.\n")
+}
+```
+
+## Feature Distributions
+
+### Summary Statistics
+
+```{r summary-stats}
+# Summary statistics for all numeric features
+cat("=== Summary Statistics (All Features) ===\n")
+summary_stats <- df %>%
+  select_if(is.numeric) %>%
+  summary()
+
+print(summary_stats)
+```
+
+### Amount Feature Analysis
+
+```{r amount-analysis}
+# Analyze Amount feature by class
+amount_stats <- df %>%
+  group_by(Class) %>%
+  summarise(
+    Count = n(),
+    Mean = mean(Amount),
+    Median = median(Amount),
+    SD = sd(Amount),
+    Min = min(Amount),
+    Max = max(Amount),
+    Q25 = quantile(Amount, 0.25),
+    Q75 = quantile(Amount, 0.75),
+    .groups = "drop"
+  ) %>%
+  mutate(Class = ifelse(Class == 0, "Non-Fraud", "Fraud"))
+
+cat("=== Amount Statistics by Class ===\n")
+print(amount_stats)
+
+# Box plot for Amount by Class
+p_amount_box <- df %>%
+  mutate(Class = factor(Class, levels = c(0, 1), labels = c("Non-Fraud", "Fraud"))) %>%
+  ggplot(aes(x = Class, y = Amount, fill = Class)) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
+  scale_fill_manual(values = c("Non-Fraud" = "#2ecc71", "Fraud" = "#e74c3c")) +
+  scale_y_log10() +
+  labs(
+    title = "Transaction Amount Distribution by Class",
+    subtitle = "Log scale",
+    x = "Transaction Type",
+    y = "Amount (log scale)"
+  ) +
+  theme(legend.position = "none")
+
+print(p_amount_box)
+
+# Density plot for Amount
+p_amount_density <- df %>%
+  mutate(Class = factor(Class, levels = c(0, 1), labels = c("Non-Fraud", "Fraud"))) %>%
+  ggplot(aes(x = Amount, fill = Class)) +
+  geom_density(alpha = 0.6) +
+  scale_fill_manual(values = c("Non-Fraud" = "#2ecc71", "Fraud" = "#e74c3c")) +
+  scale_x_log10() +
+  labs(
+    title = "Amount Distribution by Class",
+    subtitle = "Log scale",
+    x = "Amount (log scale)",
+    y = "Density",
+    fill = "Class"
+  )
+
+print(p_amount_density)
+```
+
+### Time Feature Analysis
+
+```{r time-analysis}
+# Convert Time to hours (assuming Time is in seconds)
+df <- df %>%
+  mutate(
+    Time_Hours = Time / 3600,
+    Time_Day = floor(Time_Hours / 24)
+  )
+
+# Time distribution by class
+time_stats <- df %>%
+  group_by(Class) %>%
+  summarise(
+    Mean_Time = mean(Time_Hours),
+    Median_Time = median(Time_Hours),
+    Min_Time = min(Time_Hours),
+    Max_Time = max(Time_Hours),
+    .groups = "drop"
+  ) %>%
+  mutate(Class = ifelse(Class == 0, "Non-Fraud", "Fraud"))
+
+cat("=== Time Statistics by Class ===\n")
+print(time_stats)
+
+# Time distribution plot
+p_time <- df %>%
+  mutate(Class = factor(Class, levels = c(0, 1), labels = c("Non-Fraud", "Fraud"))) %>%
+  ggplot(aes(x = Time_Hours, fill = Class)) +
+  geom_histogram(alpha = 0.6, bins = 50, position = "identity") +
+  scale_fill_manual(values = c("Non-Fraud" = "#2ecc71", "Fraud" = "#e74c3c")) +
+  labs(
+    title = "Time Distribution by Class",
+    x = "Time (hours)",
+    y = "Frequency",
+    fill = "Class"
+  ) +
+  facet_wrap(~ Class, ncol = 1, scales = "free_y")
+
+print(p_time)
+```
+
+### V-Features Distribution
+
+```{r v-features-distribution}
+# Sample a few V-features for visualization
+v_features <- paste0("V", 1:min(6, length(grep("^V", colnames(df)))))
+
+# Create distribution plots for selected V-features
+plots_list <- list()
+
+for (v_feat in v_features) {
+  if (v_feat %in% colnames(df)) {
+    p <- df %>%
+      mutate(Class = factor(Class, levels = c(0, 1), labels = c("Non-Fraud", "Fraud"))) %>%
+      ggplot(aes_string(x = v_feat, fill = "Class")) +
+      geom_density(alpha = 0.6) +
+      scale_fill_manual(values = c("Non-Fraud" = "#2ecc71", "Fraud" = "#e74c3c")) +
+      labs(
+        title = paste("Distribution of", v_feat),
+        x = v_feat,
+        y = "Density",
+        fill = "Class"
+      )
+    plots_list[[v_feat]] <- p
+  }
+}
+
+# Display plots
+for (p in plots_list) {
+  print(p)
+}
+```
+
+## Correlation Analysis
+
+```{r correlation}
+# Calculate correlation matrix
+numeric_cols <- df %>%
+  select_if(is.numeric) %>%
+  select(-Class)
+
+cor_matrix <- cor(numeric_cols, use = "complete.obs")
+
+# Correlation with Class
+cor_temp <- df %>%
+  select_if(is.numeric) %>%
+  cor(df$Class) %>%
+  as.data.frame()
+
+cor_with_class <- data.frame(
+  Feature = rownames(cor_temp),
+  Correlation = cor_temp[, 1],
+  stringsAsFactors = FALSE
+) %>%
+  arrange(desc(abs(Correlation)))
+
+cat("=== Top 10 Features Most Correlated with Class ===\n")
+print(head(cor_with_class, 10))
+```
+
+### Correlation Heatmap
+
+```{r correlation-heatmap}
+# Create correlation heatmap for V-features and key features
+key_features <- c("Time", "Amount", paste0("V", 1:min(10, length(grep("^V", colnames(df))))))
+key_features <- key_features[key_features %in% colnames(df)]
+
+cor_subset <- cor(df[key_features], use = "complete.obs")
+
+# Using corrplot
+corrplot(cor_subset, 
+         method = "color",
+         type = "upper",
+         order = "hclust",
+         tl.cex = 0.7,
+         tl.col = "black",
+         title = "Correlation Heatmap (V-Features, Time, Amount)",
+         mar = c(0, 0, 2, 0))
+```
+
+## Outlier Analysis
+
+```{r outliers}
+# Outlier detection using IQR method for Amount
+Q1 <- quantile(df$Amount, 0.25)
+Q3 <- quantile(df$Amount, 0.75)
+IQR <- Q3 - Q1
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
+
+outliers <- sum(df$Amount < lower_bound | df$Amount > upper_bound)
+
+cat("=== Outlier Analysis (Amount) ===\n")
+cat("Q1:", Q1, "\n")
+cat("Q3:", Q3, "\n")
+cat("IQR:", IQR, "\n")
+cat("Lower bound:", lower_bound, "\n")
+cat("Upper bound:", upper_bound, "\n")
+cat("Number of outliers:", outliers, "\n")
+cat("Percentage of outliers:", round(outliers / nrow(df) * 100, 2), "%\n")
+
+# Outliers by class
+outliers_by_class <- df %>%
+  mutate(IsOutlier = Amount < lower_bound | Amount > upper_bound) %>%
+  group_by(Class, IsOutlier) %>%
+  count() %>%
+  ungroup() %>%
+  mutate(Class = ifelse(Class == 0, "Non-Fraud", "Fraud"))
+
+cat("\n=== Outliers by Class ===\n")
+print(outliers_by_class)
+```
+
+## Key Findings Summary
+
+```{r findings-summary}
+cat("=== Key Findings from EDA ===\n\n")
+cat("1. Class Distribution:\n")
+cat("   - Non-Fraud:", non_fraud_count, "(", round(non_fraud_count/nrow(df)*100, 2), "%)\n")
+cat("   - Fraud:", fraud_count, "(", round(fraud_count/nrow(df)*100, 2), "%)\n")
+cat("   - Imbalance Ratio:", round(imbalance_ratio, 2), ": 1\n\n")
+
+cat("2. Data Quality:\n")
+cat("   - Missing values:", ifelse(exists("missing_summary") && nrow(missing_summary) == 0, "None", "Present"), "\n")
+cat("   - Duplicates:", duplicate_count, "\n\n")
+
+cat("3. Feature Characteristics:\n")
+cat("   - Total features:", ncol(df), "\n")
+cat("   - PCA-transformed features (V1-V28):", length(grep("^V", colnames(df))), "\n")
+cat("   - Raw features: Time, Amount\n\n")
+
+cat("4. Amount Statistics:\n")
+fraud_amount_mean <- mean(df$Amount[df$Class == 1])
+non_fraud_amount_mean <- mean(df$Amount[df$Class == 0])
+cat("   - Mean fraud amount:", round(fraud_amount_mean, 2), "\n")
+cat("   - Mean non-fraud amount:", round(non_fraud_amount_mean, 2), "\n\n")
+
+cat("5. Next Steps:\n")
+cat("   - Address class imbalance using SMOTE or class weights\n")
+cat("   - Scale Amount and Time features\n")
+cat("   - Consider feature engineering (time-based features)\n")
+cat("   - Proceed to preprocessing phase\n")
+```
+
+## Summary
+
+- ✓ Dataset loaded and explored
+- ✓ Class imbalance quantified (highly imbalanced)
+- ✓ Data quality verified (no missing values)
+- ✓ Feature distributions analyzed
+- ✓ Correlation patterns identified
+- ✓ Outliers detected and analyzed
+- ✓ Ready for preprocessing phase
+
+**Next Step**: Proceed to `02_preprocessing.Rmd` for data preprocessing and feature engineering.

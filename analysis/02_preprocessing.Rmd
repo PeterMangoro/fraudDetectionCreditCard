@@ -1,0 +1,425 @@
+---
+title: "Phase 2: Data Preprocessing and Feature Engineering"
+author: "Fraud Detection Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+    highlight: tango
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+# Determine project root directory
+current_dir <- getwd()
+if (basename(current_dir) == "analysis") {
+  project_root <- dirname(current_dir)
+  setwd(project_root)
+} else {
+  project_root <- current_dir
+}
+
+# Source the setup script
+setup_file <- file.path(project_root, "R", "setup.R")
+if (file.exists(setup_file)) {
+  source(setup_file)
+} else {
+  stop("Cannot find setup.R at: ", setup_file)
+}
+
+# Source utility functions
+source(file.path(project_root, "R", "data_utils.R"))
+source(file.path(project_root, "R", "preprocessing.R"))
+
+# Set random seed for reproducibility
+set.seed(42)
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.path = "results/figures/02_preprocessing-",
+  cache = TRUE
+)
+```
+
+## Introduction
+
+This document performs data preprocessing and feature engineering for the fraud detection project. The preprocessing steps include:
+
+1. **Data Splitting**: Stratified 3-way split (Train: 60%, Validation: 20%, Test: 20%)
+2. **Feature Engineering**: Time-based features, amount transformations, interaction features
+3. **Scaling**: Normalize features for model training
+4. **Data Quality**: Verify preprocessing maintains data integrity
+
+## Load Data
+
+```{r load-data}
+# Load the credit card dataset
+df <- load_credit_card_data()
+
+cat("\n=== Data Summary ===\n")
+cat("Total rows:", nrow(df), "\n")
+cat("Total columns:", ncol(df), "\n")
+cat("Class distribution:\n")
+print(table(df$Class))
+```
+
+## Data Splitting
+
+### Stratified 3-Way Split
+
+We split the data into three sets:
+- **Training (60%)**: Used to train models
+- **Validation (20%)**: Used for model selection and hyperparameter tuning
+- **Test (20%)**: Used only for final evaluation (held out until the end)
+
+The split is **stratified** to maintain the same class distribution in each set.
+
+```{r data-split}
+# Create stratified split
+splits <- create_stratified_split(
+  data = df,
+  train_prop = 0.6,
+  val_prop = 0.2,
+  test_prop = 0.2,
+  seed = 42
+)
+
+# Extract splits
+train_raw <- splits$train
+val_raw <- splits$validation
+test_raw <- splits$test
+```
+
+### Verify Class Distribution Preservation
+
+```{r verify-split}
+# Verify that class distribution is preserved across splits
+split_verification <- verify_split(splits)
+```
+
+## Feature Engineering
+
+### Time-Based Features
+
+Extract meaningful time features from the Time column:
+
+```{r time-features}
+# Create time features
+train_raw <- create_time_features(train_raw)
+val_raw <- create_time_features(val_raw)
+test_raw <- create_time_features(test_raw)
+
+# Display new time features
+cat("\n=== Time Features Created ===\n")
+cat("New columns:", paste(grep("Time", colnames(train_raw), value = TRUE), collapse = ", "), "\n")
+
+# Show sample of time features
+cat("\n=== Sample Time Features ===\n")
+time_cols <- c("Time", grep("Time", colnames(train_raw), value = TRUE))
+print(head(train_raw[time_cols], 10))
+```
+
+### Amount-Based Features
+
+Create transformations and categories for the Amount feature:
+
+```{r amount-features}
+# Create amount features
+train_raw <- create_amount_features(train_raw)
+val_raw <- create_amount_features(val_raw)
+test_raw <- create_amount_features(test_raw)
+
+# Display new amount features
+cat("\n=== Amount Features Created ===\n")
+cat("New columns:", paste(grep("Amount", colnames(train_raw), value = TRUE), collapse = ", "), "\n")
+
+# Show statistics of amount transformations
+cat("\n=== Amount Feature Statistics ===\n")
+amount_cols <- grep("Amount", colnames(train_raw), value = TRUE)
+amount_cols <- amount_cols[sapply(train_raw[amount_cols], is.numeric)]
+print(summary(train_raw[amount_cols]))
+```
+
+### Interaction Features
+
+Create interaction features between Amount and key V-features:
+
+```{r interaction-features}
+# Create interaction features
+train_raw <- create_interaction_features(train_raw)
+val_raw <- create_interaction_features(val_raw)
+test_raw <- create_interaction_features(test_raw)
+
+# Display interaction features created
+interaction_cols <- grep("Amount_x_", colnames(train_raw), value = TRUE)
+cat("\n=== Interaction Features Created ===\n")
+cat("Number of interactions:", length(interaction_cols), "\n")
+cat("Features:", paste(interaction_cols, collapse = ", "), "\n")
+```
+
+## Preprocessing Recipe
+
+Create a preprocessing recipe using tidymodels to handle scaling and transformations:
+
+```{r create-recipe}
+# Create preprocessing recipe
+recipe <- create_preprocessing_recipe(train_raw, target_var = "Class")
+
+# Display recipe steps
+cat("\n=== Preprocessing Recipe Steps ===\n")
+print(recipe)
+```
+
+### Fit Recipe on Training Data
+
+```{r fit-recipe}
+# Fit recipe on training data
+recipe_fitted <- recipes::prep(recipe, training = train_raw)
+
+cat("Recipe fitted on training data\n")
+cat("Training data shape:", nrow(train_raw), "×", ncol(train_raw), "\n")
+```
+
+## Apply Preprocessing
+
+### Preprocess All Datasets
+
+```{r apply-preprocessing}
+# Apply preprocessing to all datasets
+train_preprocessed <- recipes::bake(recipe_fitted, new_data = train_raw)
+val_preprocessed <- recipes::bake(recipe_fitted, new_data = val_raw)
+test_preprocessed <- recipes::bake(recipe_fitted, new_data = test_raw)
+
+cat("=== Preprocessing Applied ===\n")
+cat("Train preprocessed shape:", nrow(train_preprocessed), "×", ncol(train_preprocessed), "\n")
+cat("Validation preprocessed shape:", nrow(val_preprocessed), "×", ncol(val_preprocessed), "\n")
+cat("Test preprocessed shape:", nrow(test_preprocessed), "×", ncol(test_preprocessed), "\n")
+```
+
+### Compare Before and After Preprocessing
+
+```{r compare-preprocessing}
+# Compare Amount feature before and after
+cat("=== Amount Feature Comparison ===\n")
+cat("\nBefore preprocessing:\n")
+print(summary(train_raw$Amount))
+
+cat("\nAfter preprocessing (Amount normalized):\n")
+if ("Amount" %in% colnames(train_preprocessed)) {
+  print(summary(train_preprocessed$Amount))
+} else {
+  cat("Amount column may have been transformed\n")
+}
+
+# Compare V-features
+cat("\n=== V-Feature Comparison (V1) ===\n")
+if ("V1" %in% colnames(train_raw) && "V1" %in% colnames(train_preprocessed)) {
+  cat("\nBefore preprocessing:\n")
+  print(summary(train_raw$V1))
+  cat("\nAfter preprocessing:\n")
+  print(summary(train_preprocessed$V1))
+}
+```
+
+## Feature Summary
+
+### Final Feature List
+
+```{r feature-summary}
+cat("=== Final Feature Summary ===\n")
+cat("Total features:", ncol(train_preprocessed), "\n")
+cat("Target variable: Class\n")
+cat("Predictor features:", ncol(train_preprocessed) - 1, "\n\n")
+
+# Categorize features
+feature_types <- list(
+  Original_V = grep("^V[0-9]+$", colnames(train_preprocessed), value = TRUE),
+  Time_Features = grep("Time", colnames(train_preprocessed), value = TRUE),
+  Amount_Features = grep("Amount", colnames(train_preprocessed), value = TRUE),
+  Interactions = grep("Amount_x_", colnames(train_preprocessed), value = TRUE)
+)
+
+cat("Feature breakdown:\n")
+cat("- Original V-features:", length(feature_types$Original_V), "\n")
+cat("- Time features:", length(feature_types$Time_Features), "\n")
+cat("- Amount features:", length(feature_types$Amount_Features), "\n")
+cat("- Interaction features:", length(feature_types$Interactions), "\n")
+```
+
+### Feature Distributions After Preprocessing
+
+```{r feature-distributions}
+# Plot distributions of key features after preprocessing with improved visualizations
+if ("Amount" %in% colnames(train_preprocessed)) {
+  # 1. Full distribution (original view - shows the issue)
+  p1 <- train_preprocessed %>%
+    mutate(Class = factor(Class, levels = c(0, 1), labels = c("Non-Fraud", "Fraud"))) %>%
+    ggplot(aes(x = Amount, fill = Class)) +
+    geom_density(alpha = 0.6) +
+    scale_fill_manual(values = c("Non-Fraud" = "#2ecc71", "Fraud" = "#e74c3c")) +
+    labs(
+      title = "Amount Distribution After Preprocessing (Full Range)",
+      subtitle = "Note: Highly skewed - most values near 0",
+      x = "Amount (normalized)",
+      y = "Density",
+      fill = "Class"
+    )
+  print(p1)
+  
+  # 2. Zoomed in view (focus on 95% of data)
+  amount_95 <- quantile(train_preprocessed$Amount, 0.95, na.rm = TRUE)
+  
+  p2 <- train_preprocessed %>%
+    mutate(Class = factor(Class, levels = c(0, 1), labels = c("Non-Fraud", "Fraud"))) %>%
+    filter(Amount <= amount_95) %>%
+    ggplot(aes(x = Amount, fill = Class)) +
+    geom_density(alpha = 0.6) +
+    scale_fill_manual(values = c("Non-Fraud" = "#2ecc71", "Fraud" = "#e74c3c")) +
+    labs(
+      title = paste("Amount Distribution (Zoomed: 0 to", round(amount_95, 2), ")"),
+      subtitle = "Focusing on 95% of data",
+      x = "Amount (normalized)",
+      y = "Density",
+      fill = "Class"
+    )
+  print(p2)
+  
+  # 3. Box plot comparison (better for comparing distributions)
+  p3 <- train_preprocessed %>%
+    mutate(Class = factor(Class, levels = c(0, 1), labels = c("Non-Fraud", "Fraud"))) %>%
+    ggplot(aes(x = Class, y = Amount, fill = Class)) +
+    geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
+    scale_fill_manual(values = c("Non-Fraud" = "#2ecc71", "Fraud" = "#e74c3c")) +
+    labs(
+      title = "Amount Distribution Comparison (Box Plot)",
+      subtitle = "Shows quartiles, median, and outliers",
+      x = "Transaction Type",
+      y = "Amount (normalized)",
+      fill = "Class"
+    ) +
+    theme(legend.position = "none")
+  print(p3)
+  
+  # 4. Statistical summary table
+  cat("\n=== Amount Statistics by Class (After Preprocessing) ===\n")
+  amount_stats <- train_preprocessed %>%
+    mutate(Class = factor(Class, levels = c(0, 1), labels = c("Non-Fraud", "Fraud"))) %>%
+    group_by(Class) %>%
+    summarise(
+      Count = n(),
+      Mean = mean(Amount, na.rm = TRUE),
+      Median = median(Amount, na.rm = TRUE),
+      SD = sd(Amount, na.rm = TRUE),
+      Min = min(Amount, na.rm = TRUE),
+      Max = max(Amount, na.rm = TRUE),
+      Q25 = quantile(Amount, 0.25, na.rm = TRUE),
+      Q75 = quantile(Amount, 0.75, na.rm = TRUE),
+      .groups = "drop"
+    )
+  print(amount_stats)
+  
+  # 5. Violin plot (shows distribution shape better)
+  p4 <- train_preprocessed %>%
+    mutate(Class = factor(Class, levels = c(0, 1), labels = c("Non-Fraud", "Fraud"))) %>%
+    filter(Amount <= amount_95) %>%  # Focus on main distribution
+    ggplot(aes(x = Class, y = Amount, fill = Class)) +
+    geom_violin(alpha = 0.7, trim = FALSE) +
+    geom_boxplot(width = 0.1, alpha = 0.5, outlier.alpha = 0.3) +
+    scale_fill_manual(values = c("Non-Fraud" = "#2ecc71", "Fraud" = "#e74c3c")) +
+    labs(
+      title = "Amount Distribution (Violin Plot)",
+      subtitle = paste("Zoomed to 95th percentile (", round(amount_95, 2), ")"),
+      x = "Transaction Type",
+      y = "Amount (normalized)",
+      fill = "Class"
+    ) +
+    theme(legend.position = "none")
+  print(p4)
+}
+
+# Plot Time_Hours if it exists
+if ("Time_Hours" %in% colnames(train_preprocessed)) {
+  p_time <- train_preprocessed %>%
+    mutate(Class = factor(Class, levels = c(0, 1), labels = c("Non-Fraud", "Fraud"))) %>%
+    ggplot(aes(x = Time_Hours, fill = Class)) +
+    geom_histogram(alpha = 0.6, bins = 30, position = "identity") +
+    scale_fill_manual(values = c("Non-Fraud" = "#2ecc71", "Fraud" = "#e74c3c")) +
+    labs(
+      title = "Time_Hours Distribution After Preprocessing",
+      x = "Time (hours, normalized)",
+      y = "Frequency",
+      fill = "Class"
+    )
+  print(p_time)
+}
+```
+
+
+## Save Preprocessed Data
+
+```{r save-data}
+# Save preprocessed datasets
+save_preprocessed_data(splits, output_dir = paths$data)
+
+# Also save the recipe for later use
+saveRDS(recipe_fitted, file.path(paths$models, "preprocessing_recipe.rds"))
+cat("\nPreprocessing recipe saved to:", file.path(paths$models, "preprocessing_recipe.rds"), "\n")
+```
+
+## Summary Statistics
+
+### Training Set Summary
+
+```{r train-summary}
+cat("=== Training Set Summary ===\n")
+cat("Rows:", nrow(train_preprocessed), "\n")
+cat("Columns:", ncol(train_preprocessed), "\n")
+cat("Class distribution:\n")
+print(table(train_preprocessed$Class))
+cat("\nClass percentages:\n")
+print(round(prop.table(table(train_preprocessed$Class)) * 100, 4))
+```
+
+### Validation Set Summary
+
+```{r val-summary}
+cat("\n=== Validation Set Summary ===\n")
+cat("Rows:", nrow(val_preprocessed), "\n")
+cat("Columns:", ncol(val_preprocessed), "\n")
+cat("Class distribution:\n")
+print(table(val_preprocessed$Class))
+cat("\nClass percentages:\n")
+print(round(prop.table(table(val_preprocessed$Class)) * 100, 4))
+```
+
+### Test Set Summary
+
+```{r test-summary}
+cat("\n=== Test Set Summary ===\n")
+cat("Rows:", nrow(test_preprocessed), "\n")
+cat("Columns:", ncol(test_preprocessed), "\n")
+cat("Class distribution:\n")
+print(table(test_preprocessed$Class))
+cat("\nClass percentages:\n")
+print(round(prop.table(table(test_preprocessed$Class)) * 100, 4))
+```
+
+## Summary
+
+- ✓ Data split into train (60%), validation (20%), and test (20%) sets
+- ✓ Stratified splitting maintained class distribution
+- ✓ Time-based features created (Hour_of_Day, Day_of_Dataset, Time_of_Day)
+- ✓ Amount features created (log transform, sqrt transform, categories)
+- ✓ Interaction features created (Amount × V-features)
+- ✓ Preprocessing recipe created and applied
+- ✓ Features normalized and scaled appropriately
+- ✓ Preprocessed datasets saved for model training
+- ✓ Ready for baseline model training
+
+**Next Step**: Proceed to `03_baseline.Rmd` to train baseline models.

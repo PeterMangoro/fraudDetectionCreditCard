@@ -1,0 +1,434 @@
+---
+title: "Phase 3: Baseline Models"
+author: "Fraud Detection Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+    highlight: tango
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+# Determine project root directory
+current_dir <- getwd()
+if (basename(current_dir) == "analysis") {
+  project_root <- dirname(current_dir)
+  setwd(project_root)
+} else {
+  project_root <- current_dir
+}
+
+# Source the setup script
+setup_file <- file.path(project_root, "R", "setup.R")
+if (file.exists(setup_file)) {
+  source(setup_file)
+} else {
+  stop("Cannot find setup.R at: ", setup_file)
+}
+
+# Source utility functions
+source(file.path(project_root, "R", "data_utils.R"))
+source(file.path(project_root, "R", "preprocessing.R"))
+source(file.path(project_root, "R", "evaluation.R"))
+
+# Set random seed for reproducibility
+set.seed(42)
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.path = "results/figures/03_baseline-",
+  cache = TRUE
+)
+```
+
+## Introduction
+
+This document establishes baseline models for fraud detection. Baseline models serve as reference points to compare against more sophisticated approaches. We'll train three baseline models:
+
+1. **Majority Class Classifier**: Always predicts the majority class (non-fraud)
+2. **Logistic Regression**: Simple, interpretable linear model
+3. **Random Forest**: Tree-based ensemble with default parameters
+
+These baselines help us understand:
+- The difficulty of the problem
+- Whether more complex models provide value
+- Expected performance ranges
+
+## Load Preprocessed Data
+
+```{r load-data}
+# Load raw datasets (saved splits from preprocessing phase)
+train_raw <- readr::read_csv(file.path(paths$data, "train.csv"), show_col_types = FALSE)
+val_raw <- readr::read_csv(file.path(paths$data, "validation.csv"), show_col_types = FALSE)
+
+cat("=== Loading Raw Data ===\n")
+cat("Training set:", nrow(train_raw), "rows ×", ncol(train_raw), "columns\n")
+cat("Validation set:", nrow(val_raw), "rows ×", ncol(val_raw), "columns\n")
+
+# Apply feature engineering (same as in preprocessing phase)
+cat("\n=== Applying Feature Engineering ===\n")
+train_raw <- create_time_features(train_raw)
+val_raw <- create_time_features(val_raw)
+
+train_raw <- create_amount_features(train_raw)
+val_raw <- create_amount_features(val_raw)
+
+train_raw <- create_interaction_features(train_raw)
+val_raw <- create_interaction_features(val_raw)
+
+cat("Feature engineering complete.\n")
+cat("Training set after feature engineering:", nrow(train_raw), "rows ×", ncol(train_raw), "columns\n")
+
+# Load preprocessing recipe
+cat("\n=== Loading Preprocessing Recipe ===\n")
+recipe_fitted <- readRDS(file.path(paths$models, "preprocessing_recipe.rds"))
+
+# Apply preprocessing recipe
+cat("Applying preprocessing recipe...\n")
+train_preprocessed <- recipes::bake(recipe_fitted, new_data = train_raw)
+val_preprocessed <- recipes::bake(recipe_fitted, new_data = val_raw)
+
+cat("\n=== Data Preprocessing Complete ===\n")
+cat("Training set:", nrow(train_preprocessed), "rows ×", ncol(train_preprocessed), "columns\n")
+cat("Validation set:", nrow(val_preprocessed), "rows ×", ncol(val_preprocessed), "columns\n")
+
+# Convert Class to factor for classification models
+# Convert to character first, then to factor (handles both numeric and factor inputs)
+train_class_char <- as.character(train_preprocessed$Class)
+train_class_char[train_class_char == "0"] <- "Non-Fraud"
+train_class_char[train_class_char == "1"] <- "Fraud"
+train_preprocessed$Class <- factor(train_class_char, levels = c("Non-Fraud", "Fraud"))
+
+val_class_char <- as.character(val_preprocessed$Class)
+val_class_char[val_class_char == "0"] <- "Non-Fraud"
+val_class_char[val_class_char == "1"] <- "Fraud"
+val_preprocessed$Class <- factor(val_class_char, levels = c("Non-Fraud", "Fraud"))
+
+cat("Class distribution (train):\n")
+print(table(train_preprocessed$Class))
+cat("Class distribution (validation):\n")
+print(table(val_preprocessed$Class))
+```
+
+## Load Cost Matrix
+
+```{r load-cost-matrix}
+# Load cost matrix from setup (if available)
+# For now, we'll define it here
+cost_matrix <- list(
+  TP = 0,      # True Positive: Fraud caught (no cost, money saved)
+  FP = 10,     # False Positive: Investigation cost
+  FN = 100,    # False Negative: Average fraud amount lost
+  TN = 0       # True Negative: Correct transaction (no cost)
+)
+
+cat("=== Cost Matrix ===\n")
+cat("True Positive (TP):  $", cost_matrix$TP, "\n")
+cat("False Positive (FP): $", cost_matrix$FP, "\n")
+cat("False Negative (FN): $", cost_matrix$FN, "\n")
+cat("True Negative (TN):  $", cost_matrix$TN, "\n")
+```
+
+## Baseline 1: Majority Class Classifier
+
+The simplest baseline: always predict the majority class (non-fraud). This demonstrates why accuracy alone is misleading for imbalanced datasets.
+
+```{r majority-classifier}
+# Majority class classifier
+majority_class <- names(sort(table(train_preprocessed$Class), decreasing = TRUE))[1]
+cat("Majority class:", majority_class, "\n")
+
+# Predict majority class for all validation instances
+val_truth <- val_preprocessed$Class
+val_majority_pred <- factor(rep(majority_class, length(val_truth)), 
+                            levels = levels(val_truth))
+
+# Create "probabilities" (all 0 or 1)
+if (majority_class == "Fraud") {
+  val_majority_prob <- rep(1.0, length(val_truth))
+} else {
+  val_majority_prob <- rep(0.0, length(val_truth))
+}
+
+# Evaluate
+majority_result <- list(
+  predictions = data.frame(
+    truth = val_truth,
+    estimate = val_majority_pred,
+    prob = val_majority_prob
+  ),
+  metrics = calculate_all_metrics(val_truth, val_majority_pred, val_majority_prob),
+  confusion_matrix = create_confusion_matrix(val_truth, val_majority_pred),
+  cost = calculate_cost_metrics(val_truth, val_majority_pred, cost_matrix)
+)
+
+print_evaluation_summary(majority_result, "Majority Class Classifier")
+```
+
+## Baseline 2: Logistic Regression
+
+A simple, interpretable linear model. Good baseline for understanding feature importance.
+
+```{r logistic-regression}
+# Create logistic regression model
+lr_model <- parsnip::logistic_reg() %>%
+  parsnip::set_engine("glm") %>%
+  parsnip::set_mode("classification")
+
+# Create workflow
+lr_workflow <- workflows::workflow() %>%
+  workflows::add_model(lr_model) %>%
+  workflows::add_formula(Class ~ .)
+
+# Train model
+cat("Training Logistic Regression...\n")
+lr_fitted <- lr_workflow %>%
+  parsnip::fit(data = train_preprocessed)
+
+cat("Training complete.\n")
+
+# Evaluate on validation set
+lr_result <- evaluate_model(lr_fitted, val_preprocessed, target_var = "Class", cost_matrix = cost_matrix)
+
+print_evaluation_summary(lr_result, "Logistic Regression")
+```
+
+### Logistic Regression Coefficients
+
+```{r lr-coefficients}
+# Extract coefficients
+lr_coefs <- lr_fitted %>%
+  workflows::extract_fit_engine() %>%
+  broom::tidy() %>%
+  dplyr::arrange(desc(abs(estimate)))
+
+cat("=== Top 10 Most Important Features (Logistic Regression) ===\n")
+print(head(lr_coefs, 10))
+
+# Plot top coefficients
+p_lr_coefs <- lr_coefs %>%
+  dplyr::filter(term != "(Intercept)") %>%
+  dplyr::slice_head(n = 15) %>%
+  dplyr::mutate(
+    term = forcats::fct_reorder(term, abs(estimate)),
+    direction = ifelse(estimate > 0, "Positive", "Negative")
+  ) %>%
+  ggplot2::ggplot(aes(x = estimate, y = term, fill = direction)) +
+  ggplot2::geom_col(alpha = 0.7) +
+  ggplot2::scale_fill_manual(values = c("Positive" = "#e74c3c", "Negative" = "#3498db")) +
+  ggplot2::labs(
+    title = "Top 15 Logistic Regression Coefficients",
+    subtitle = "Larger absolute values indicate stronger influence",
+    x = "Coefficient Value",
+    y = "Feature",
+    fill = "Direction"
+  ) +
+  ggplot2::theme(legend.position = "bottom")
+
+print(p_lr_coefs)
+```
+
+## Baseline 3: Random Forest
+
+A tree-based ensemble method with default parameters. Often performs well on structured data.
+
+```{r random-forest}
+# Create Random Forest model
+rf_model <- parsnip::rand_forest(
+  trees = 100,
+  min_n = 2,
+  mtry = floor(sqrt(ncol(train_preprocessed) - 1))  # Default: sqrt of features
+) %>%
+  parsnip::set_engine("ranger", importance = "impurity") %>%
+  parsnip::set_mode("classification")
+
+# Create workflow
+rf_workflow <- workflows::workflow() %>%
+  workflows::add_model(rf_model) %>%
+  workflows::add_formula(Class ~ .)
+
+# Train model
+cat("Training Random Forest...\n")
+rf_fitted <- rf_workflow %>%
+  parsnip::fit(data = train_preprocessed)
+
+cat("Training complete.\n")
+
+# Evaluate on validation set
+rf_result <- evaluate_model(rf_fitted, val_preprocessed, target_var = "Class", cost_matrix = cost_matrix)
+
+print_evaluation_summary(rf_result, "Random Forest")
+```
+
+### Random Forest Feature Importance
+
+```{r rf-importance}
+# Extract feature importance
+rf_importance <- rf_fitted %>%
+  workflows::extract_fit_engine() %>%
+  vip::vip(num_features = 20)
+
+print(rf_importance)
+
+# Get importance values
+rf_imp_values <- rf_fitted %>%
+  workflows::extract_fit_engine() %>%
+  vip::vi()
+
+cat("\n=== Top 20 Most Important Features (Random Forest) ===\n")
+print(head(rf_imp_values, 20))
+```
+
+## Baseline Comparison
+
+Compare all three baseline models side by side.
+
+```{r baseline-comparison}
+# Create comparison table
+baseline_results <- list(
+  majority_result,
+  lr_result,
+  rf_result
+)
+
+model_names <- c("Majority Class", "Logistic Regression", "Random Forest")
+
+comparison_table <- create_baseline_comparison(baseline_results, model_names)
+
+cat("=== Baseline Model Comparison ===\n")
+print(comparison_table)
+
+# Create visualization
+comparison_long <- comparison_table %>%
+  tidyr::pivot_longer(
+    cols = -Model,
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  dplyr::filter(Metric %in% c("Precision", "Recall", "F1", "MCC", "PR_AUC", "ROC_AUC"))
+
+p_comparison <- comparison_long %>%
+  ggplot2::ggplot(aes(x = Metric, y = Value, fill = Model)) +
+  ggplot2::geom_col(position = "dodge", alpha = 0.8) +
+  ggplot2::scale_fill_manual(values = c(
+    "Majority Class" = "#95a5a6",
+    "Logistic Regression" = "#3498db",
+    "Random Forest" = "#2ecc71"
+  )) +
+  ggplot2::labs(
+    title = "Baseline Model Comparison",
+    subtitle = "Performance on Validation Set",
+    x = "Metric",
+    y = "Value",
+    fill = "Model"
+  ) +
+  ggplot2::theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggplot2::ylim(0, 1)
+
+print(p_comparison)
+```
+
+### Cost Analysis Comparison
+
+```{r cost-comparison}
+# Compare costs
+cost_comparison <- data.frame(
+  Model = model_names,
+  Total_Cost = sapply(baseline_results, function(x) {
+    if (!is.null(x$cost)) x$cost$total_cost else NA
+  })
+)
+
+cat("=== Cost Analysis Comparison ===\n")
+print(cost_comparison)
+
+# Visualize costs
+p_cost <- cost_comparison %>%
+  ggplot2::ggplot(aes(x = Model, y = Total_Cost, fill = Model)) +
+  ggplot2::geom_col(alpha = 0.8) +
+  ggplot2::scale_fill_manual(values = c(
+    "Majority Class" = "#95a5a6",
+    "Logistic Regression" = "#3498db",
+    "Random Forest" = "#2ecc71"
+  )) +
+  ggplot2::labs(
+    title = "Total Cost Comparison",
+    subtitle = "Lower is better",
+    x = "Model",
+    y = "Total Cost ($)",
+    fill = "Model"
+  ) +
+  ggplot2::theme(legend.position = "none")
+
+print(p_cost)
+```
+
+## Key Insights
+
+```{r insights}
+cat("=== Key Insights from Baseline Models ===\n\n")
+
+cat("1. Majority Class Classifier:\n")
+cat("   - Accuracy:", round(majority_result$metrics$Accuracy, 4), "\n")
+cat("   - Recall:", round(majority_result$metrics$Recall, 4), "\n")
+cat("   - This demonstrates why accuracy alone is misleading!\n\n")
+
+cat("2. Logistic Regression:\n")
+cat("   - F1 Score:", round(lr_result$metrics$F1, 4), "\n")
+cat("   - PR-AUC:", round(lr_result$metrics$PR_AUC, 4), "\n")
+cat("   - Provides interpretable feature coefficients\n\n")
+
+cat("3. Random Forest:\n")
+cat("   - F1 Score:", round(rf_result$metrics$F1, 4), "\n")
+cat("   - PR-AUC:", round(rf_result$metrics$PR_AUC, 4), "\n")
+cat("   - Best performing baseline model\n\n")
+
+# Find best model
+best_model_idx <- which.max(comparison_table$PR_AUC)
+best_model_name <- comparison_table$Model[best_model_idx]
+
+cat("4. Best Baseline Model:", best_model_name, "\n")
+cat("   - PR-AUC:", round(comparison_table$PR_AUC[best_model_idx], 4), "\n")
+cat("   - This will serve as our baseline for comparison\n")
+```
+
+## Save Baseline Models
+
+```{r save-models}
+# Save models
+saveRDS(lr_fitted, file.path(paths$models, "baseline_lr.rds"))
+saveRDS(rf_fitted, file.path(paths$models, "baseline_rf.rds"))
+
+# Save comparison table
+readr::write_csv(comparison_table, file.path(paths$tables, "baseline_comparison.csv"))
+
+cat("=== Models Saved ===\n")
+cat("Logistic Regression:", file.path(paths$models, "baseline_lr.rds"), "\n")
+cat("Random Forest:", file.path(paths$models, "baseline_rf.rds"), "\n")
+cat("Comparison table:", file.path(paths$tables, "baseline_comparison.csv"), "\n")
+```
+
+## Summary
+
+- ✓ Majority class classifier established (demonstrates accuracy fallacy)
+- ✓ Logistic Regression trained and evaluated
+- ✓ Random Forest trained and evaluated
+- ✓ All models compared on validation set
+- ✓ Feature importance analyzed
+- ✓ Cost analysis performed
+- ✓ Baseline performance established
+
+**Key Findings:**
+- Majority class classifier has high accuracy but zero recall (catches no fraud)
+- Logistic Regression provides interpretable baseline
+- Random Forest shows best performance among baselines
+- All models need improvement (addressing class imbalance will be next step)
+
+**Next Step**: Proceed to `04_imbalance_techniques.Rmd` to compare different techniques for handling class imbalance.

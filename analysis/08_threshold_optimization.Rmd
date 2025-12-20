@@ -1,0 +1,491 @@
+---
+title: "Phase 8: Threshold Optimization"
+author: "Fraud Detection Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+    highlight: tango
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+# Determine project root directory
+current_dir <- getwd()
+if (basename(current_dir) == "analysis") {
+  project_root <- dirname(current_dir)
+  setwd(project_root)
+} else {
+  project_root <- current_dir
+}
+
+# Source the setup script
+setup_file <- file.path(project_root, "R", "setup.R")
+if (file.exists(setup_file)) {
+  source(setup_file)
+} else {
+  stop("Cannot find setup.R at: ", setup_file)
+}
+
+# Source utility functions
+source(file.path(project_root, "R", "data_utils.R"))
+source(file.path(project_root, "R", "preprocessing.R"))
+source(file.path(project_root, "R", "evaluation.R"))
+
+# Set random seed for reproducibility
+set.seed(42)
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.path = "results/figures/08_threshold_optimization-",
+  cache = TRUE
+)
+```
+
+## Introduction
+
+This document performs comprehensive threshold optimization to find the optimal classification threshold for different business objectives:
+
+1. **Maximum F1-Score**: Balanced precision and recall
+2. **Maximum F-beta (β=2)**: Emphasizes recall (catching more frauds)
+3. **Cost-Optimized**: Minimizes total cost based on cost matrix
+4. **Business-Specific**: Custom thresholds based on precision/recall requirements
+
+## Load Test Set Predictions
+
+```{r load-predictions}
+# Load test data
+test_raw <- readr::read_csv(file.path(paths$data, "test.csv"), show_col_types = FALSE)
+
+cat("=== Loading Test Data ===\n")
+cat("Test set:", nrow(test_raw), "rows\n")
+
+# Apply feature engineering
+test_raw <- create_time_features(test_raw)
+test_raw <- create_amount_features(test_raw)
+test_raw <- create_interaction_features(test_raw)
+
+# Load preprocessing recipe
+recipe_fitted <- readRDS(file.path(paths$models, "preprocessing_recipe.rds"))
+
+# Apply preprocessing
+test_preprocessed <- recipes::bake(recipe_fitted, new_data = test_raw)
+
+# Convert Class to factor
+test_class_char <- as.character(test_preprocessed$Class)
+test_class_char[test_class_char == "0"] <- "Non-Fraud"
+test_class_char[test_class_char == "1"] <- "Fraud"
+test_preprocessed$Class <- factor(test_class_char, levels = c("Non-Fraud", "Fraud"))
+
+# Load final model
+final_model <- readRDS(file.path(paths$models, "final_model.rds"))
+
+# Get predictions
+test_prob <- predict(final_model, new_data = test_preprocessed, type = "prob")
+test_truth <- test_preprocessed$Class
+
+cat("\n=== Predictions Ready ===\n")
+cat("Test samples:", length(test_truth), "\n")
+cat("Fraud cases:", sum(test_truth == "Fraud"), "\n")
+cat("Non-Fraud cases:", sum(test_truth == "Non-Fraud"), "\n")
+```
+
+## Threshold Analysis
+
+```{r threshold-analysis}
+cat("=== Threshold Analysis ===\n")
+
+# Generate predictions across a range of thresholds
+thresholds <- seq(0.1, 0.9, by = 0.01)
+n_thresh <- length(thresholds)
+
+# Initialize results storage
+threshold_results <- data.frame(
+  threshold = thresholds,
+  precision = numeric(n_thresh),
+  recall = numeric(n_thresh),
+  f1 = numeric(n_thresh),
+  f2 = numeric(n_thresh),  # F-beta with beta=2
+  total_cost = numeric(n_thresh),
+  tp = numeric(n_thresh),
+  fp = numeric(n_thresh),
+  fn = numeric(n_thresh),
+  tn = numeric(n_thresh)
+)
+
+# Load cost matrix
+cost_matrix <- list(TP = 0, FP = 10, FN = 100, TN = 0)
+
+# Calculate metrics for each threshold
+for (i in 1:n_thresh) {
+  thresh <- thresholds[i]
+  
+  # Convert probabilities to predictions
+  pred_at_thresh <- factor(
+    ifelse(test_prob$.pred_Fraud > thresh, "Fraud", "Non-Fraud"),
+    levels = c("Non-Fraud", "Fraud")
+  )
+  
+  # Calculate metrics
+  metrics <- calculate_all_metrics(
+    truth = test_truth,
+    estimate = pred_at_thresh,
+    prob = test_prob$.pred_Fraud
+  )
+  
+  # Calculate F-beta (beta=2)
+  precision <- metrics$Precision
+  recall <- metrics$Recall
+  f2 <- (1 + 2^2) * (precision * recall) / (2^2 * precision + recall)
+  if (is.na(f2)) f2 <- 0
+  
+  # Calculate costs
+  costs <- calculate_cost_metrics(test_truth, pred_at_thresh, cost_matrix)
+  
+  # Create confusion matrix for counts
+  cm <- create_confusion_matrix(test_truth, pred_at_thresh)
+  tp <- sum(cm$Freq[cm$Truth == "Fraud" & cm$Prediction == "Fraud"])
+  fp <- sum(cm$Freq[cm$Truth == "Non-Fraud" & cm$Prediction == "Fraud"])
+  fn <- sum(cm$Freq[cm$Truth == "Fraud" & cm$Prediction == "Non-Fraud"])
+  tn <- sum(cm$Freq[cm$Truth == "Non-Fraud" & cm$Prediction == "Non-Fraud"])
+  
+  # Store results
+  threshold_results$precision[i] <- precision
+  threshold_results$recall[i] <- recall
+  threshold_results$f1[i] <- metrics$F1
+  threshold_results$f2[i] <- f2
+  threshold_results$total_cost[i] <- costs$total_cost
+  threshold_results$tp[i] <- tp
+  threshold_results$fp[i] <- fp
+  threshold_results$fn[i] <- fn
+  threshold_results$tn[i] <- tn
+}
+
+cat("Analyzed", n_thresh, "thresholds\n")
+```
+
+## Optimal Thresholds
+
+```{r optimal-thresholds}
+cat("=== Optimal Thresholds for Different Objectives ===\n\n")
+
+# 1. Maximum F1-Score
+f1_max_idx <- which.max(threshold_results$f1)
+thresh_f1 <- threshold_results$threshold[f1_max_idx]
+f1_max <- threshold_results$f1[f1_max_idx]
+
+cat("1. Maximum F1-Score:\n")
+cat("   Threshold:", thresh_f1, "\n")
+cat("   F1-Score:", round(f1_max, 4), "\n")
+cat("   Precision:", round(threshold_results$precision[f1_max_idx], 4), "\n")
+cat("   Recall:", round(threshold_results$recall[f1_max_idx], 4), "\n")
+cat("   Total Cost: $", threshold_results$total_cost[f1_max_idx], "\n\n")
+
+# 2. Maximum F-beta (beta=2) - Emphasizes Recall
+f2_max_idx <- which.max(threshold_results$f2)
+thresh_f2 <- threshold_results$threshold[f2_max_idx]
+f2_max <- threshold_results$f2[f2_max_idx]
+
+cat("2. Maximum F-beta (β=2) - Recall Emphasis:\n")
+cat("   Threshold:", thresh_f2, "\n")
+cat("   F2-Score:", round(f2_max, 4), "\n")
+cat("   Precision:", round(threshold_results$precision[f2_max_idx], 4), "\n")
+cat("   Recall:", round(threshold_results$recall[f2_max_idx], 4), "\n")
+cat("   Total Cost: $", threshold_results$total_cost[f2_max_idx], "\n\n")
+
+# 3. Cost-Optimized
+cost_min_idx <- which.min(threshold_results$total_cost)
+thresh_cost <- threshold_results$threshold[cost_min_idx]
+cost_min <- threshold_results$total_cost[cost_min_idx]
+
+cat("3. Cost-Optimized:\n")
+cat("   Threshold:", thresh_cost, "\n")
+cat("   Total Cost: $", cost_min, "\n")
+cat("   Cost per Transaction: $", round(cost_min / length(test_truth), 2), "\n")
+cat("   Precision:", round(threshold_results$precision[cost_min_idx], 4), "\n")
+cat("   Recall:", round(threshold_results$recall[cost_min_idx], 4), "\n")
+cat("   F1-Score:", round(threshold_results$f1[cost_min_idx], 4), "\n\n")
+
+# 4. High Precision (minimize false positives)
+# Find threshold with precision >= 0.9
+high_precision <- threshold_results[threshold_results$precision >= 0.9, ]
+if (nrow(high_precision) > 0) {
+  thresh_precision <- high_precision$threshold[which.max(high_precision$recall)]
+  prec_idx <- which(threshold_results$threshold == thresh_precision)
+  
+  cat("4. High Precision (≥90%):\n")
+  cat("   Threshold:", thresh_precision, "\n")
+  cat("   Precision:", round(threshold_results$precision[prec_idx], 4), "\n")
+  cat("   Recall:", round(threshold_results$recall[prec_idx], 4), "\n")
+  cat("   F1-Score:", round(threshold_results$f1[prec_idx], 4), "\n")
+  cat("   Total Cost: $", threshold_results$total_cost[prec_idx], "\n\n")
+} else {
+  cat("4. High Precision (≥90%): Not achievable\n\n")
+}
+
+# 5. High Recall (minimize false negatives)
+# Find threshold with recall >= 0.9
+high_recall <- threshold_results[threshold_results$recall >= 0.9, ]
+if (nrow(high_recall) > 0) {
+  thresh_recall <- high_recall$threshold[which.max(high_recall$precision)]
+  rec_idx <- which(threshold_results$threshold == thresh_recall)
+  
+  cat("5. High Recall (≥90%):\n")
+  cat("   Threshold:", thresh_recall, "\n")
+  cat("   Precision:", round(threshold_results$precision[rec_idx], 4), "\n")
+  cat("   Recall:", round(threshold_results$recall[rec_idx], 4), "\n")
+  cat("   F1-Score:", round(threshold_results$f1[rec_idx], 4), "\n")
+  cat("   Total Cost: $", threshold_results$total_cost[rec_idx], "\n\n")
+} else {
+  cat("5. High Recall (≥90%): Not achievable\n\n")
+}
+```
+
+## Threshold Visualization
+
+```{r threshold-viz}
+# Plot 1: Precision-Recall Trade-off
+p_pr_tradeoff <- threshold_results %>%
+  ggplot2::ggplot(aes(x = recall, y = precision, color = threshold)) +
+  ggplot2::geom_path(linewidth = 1) +
+  ggplot2::geom_point(aes(x = threshold_results$recall[f1_max_idx], 
+                          y = threshold_results$precision[f1_max_idx]),
+                      color = "red", size = 3, shape = 16) +
+  ggplot2::geom_point(aes(x = threshold_results$recall[f2_max_idx], 
+                          y = threshold_results$precision[f2_max_idx]),
+                      color = "blue", size = 3, shape = 17) +
+  ggplot2::geom_point(aes(x = threshold_results$recall[cost_min_idx], 
+                          y = threshold_results$precision[cost_min_idx]),
+                      color = "green", size = 3, shape = 18) +
+  ggplot2::scale_color_gradient(low = "blue", high = "red", name = "Threshold") +
+  ggplot2::labs(
+    title = "Precision-Recall Trade-off",
+    subtitle = "Red: Max F1, Blue: Max F2, Green: Min Cost",
+    x = "Recall",
+    y = "Precision"
+  ) +
+  ggplot2::theme_minimal()
+
+print(p_pr_tradeoff)
+
+# Plot 2: Metrics vs Threshold
+p_metrics <- threshold_results %>%
+  tidyr::pivot_longer(
+    cols = c(precision, recall, f1, f2),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  ggplot2::ggplot(aes(x = threshold, y = Value, color = Metric)) +
+  ggplot2::geom_line(linewidth = 1) +
+  ggplot2::geom_vline(xintercept = c(thresh_f1, thresh_f2, thresh_cost), 
+                      linetype = "dashed", alpha = 0.5) +
+  ggplot2::labs(
+    title = "Metrics vs Classification Threshold",
+    x = "Threshold",
+    y = "Metric Value",
+    color = "Metric"
+  ) +
+  ggplot2::scale_color_manual(
+    values = c("precision" = "blue", "recall" = "red", 
+                "f1" = "green", "f2" = "purple"),
+    labels = c("Precision", "Recall", "F1", "F2")
+  ) +
+  ggplot2::theme_minimal()
+
+print(p_metrics)
+
+# Plot 3: Cost vs Threshold
+p_cost <- threshold_results %>%
+  ggplot2::ggplot(aes(x = threshold, y = total_cost)) +
+  ggplot2::geom_line(linewidth = 1, color = "steelblue") +
+  ggplot2::geom_point(aes(x = thresh_cost, y = cost_min), 
+                     color = "red", size = 4, shape = 16) +
+  ggplot2::labs(
+    title = "Total Cost vs Classification Threshold",
+    subtitle = paste("Minimum cost at threshold =", thresh_cost),
+    x = "Threshold",
+    y = "Total Cost ($)"
+  ) +
+  ggplot2::theme_minimal()
+
+print(p_cost)
+```
+
+## Confusion Matrices at Optimal Thresholds
+
+```{r optimal-confusion-matrices}
+cat("=== Confusion Matrices at Optimal Thresholds ===\n\n")
+
+# Function to create predictions at threshold
+predict_at_threshold <- function(prob, threshold) {
+  factor(
+    ifelse(prob > threshold, "Fraud", "Non-Fraud"),
+    levels = c("Non-Fraud", "Fraud")
+  )
+}
+
+# 1. Maximum F1
+cat("--- Maximum F1-Score (Threshold =", thresh_f1, ") ---\n")
+pred_f1 <- predict_at_threshold(test_prob$.pred_Fraud, thresh_f1)
+cm_f1 <- create_confusion_matrix(test_truth, pred_f1)
+print(cm_f1)
+cat("\n")
+
+# 2. Maximum F2
+cat("--- Maximum F2-Score (Threshold =", thresh_f2, ") ---\n")
+pred_f2 <- predict_at_threshold(test_prob$.pred_Fraud, thresh_f2)
+cm_f2 <- create_confusion_matrix(test_truth, pred_f2)
+print(cm_f2)
+cat("\n")
+
+# 3. Cost-Optimized
+cat("--- Cost-Optimized (Threshold =", thresh_cost, ") ---\n")
+pred_cost <- predict_at_threshold(test_prob$.pred_Fraud, thresh_cost)
+cm_cost <- create_confusion_matrix(test_truth, pred_cost)
+print(cm_cost)
+cat("\n")
+```
+
+## Detailed Comparison
+
+```{r detailed-comparison}
+cat("=== Detailed Comparison of Optimal Thresholds ===\n\n")
+
+comparison_optimal <- data.frame(
+  Objective = c("Max F1", "Max F2 (Recall)", "Min Cost"),
+  Threshold = c(thresh_f1, thresh_f2, thresh_cost),
+  Precision = c(
+    threshold_results$precision[f1_max_idx],
+    threshold_results$precision[f2_max_idx],
+    threshold_results$precision[cost_min_idx]
+  ),
+  Recall = c(
+    threshold_results$recall[f1_max_idx],
+    threshold_results$recall[f2_max_idx],
+    threshold_results$recall[cost_min_idx]
+  ),
+  F1 = c(
+    threshold_results$f1[f1_max_idx],
+    threshold_results$f1[f2_max_idx],
+    threshold_results$f1[cost_min_idx]
+  ),
+  F2 = c(
+    threshold_results$f2[f1_max_idx],
+    threshold_results$f2[f2_max_idx],
+    threshold_results$f2[cost_min_idx]
+  ),
+  Total_Cost = c(
+    threshold_results$total_cost[f1_max_idx],
+    threshold_results$total_cost[f2_max_idx],
+    threshold_results$total_cost[cost_min_idx]
+  ),
+  TP = c(
+    threshold_results$tp[f1_max_idx],
+    threshold_results$tp[f2_max_idx],
+    threshold_results$tp[cost_min_idx]
+  ),
+  FP = c(
+    threshold_results$fp[f1_max_idx],
+    threshold_results$fp[f2_max_idx],
+    threshold_results$fp[cost_min_idx]
+  ),
+  FN = c(
+    threshold_results$fn[f1_max_idx],
+    threshold_results$fn[f2_max_idx],
+    threshold_results$fn[cost_min_idx]
+  )
+)
+
+# Round numeric columns
+comparison_optimal[, 3:6] <- round(comparison_optimal[, 3:6], 4)
+
+print(comparison_optimal)
+```
+
+## Recommendations
+
+```{r recommendations}
+cat("=== Threshold Recommendations ===\n\n")
+
+cat("Based on the analysis, here are recommendations for different business scenarios:\n\n")
+
+cat("1. **Balanced Performance (Recommended for General Use)**:\n")
+cat("   Threshold:", thresh_f1, "\n")
+cat("   Rationale: Maximizes F1-score, providing balanced precision and recall\n")
+cat("   Use when: You need a good balance between catching frauds and minimizing false alarms\n\n")
+
+cat("2. **Fraud Detection Priority (Catch More Frauds)**:\n")
+cat("   Threshold:", thresh_f2, "\n")
+cat("   Rationale: Maximizes F2-score, emphasizing recall to catch more fraud cases\n")
+cat("   Use when: Missing frauds is more costly than investigating false alarms\n\n")
+
+cat("3. **Cost Optimization (Minimize Total Cost)**:\n")
+cat("   Threshold:", thresh_cost, "\n")
+cat("   Rationale: Minimizes total cost based on cost matrix\n")
+cat("   Use when: You want to minimize overall financial impact\n\n")
+
+cat("4. **Custom Threshold Selection**:\n")
+cat("   If you have specific precision or recall requirements:\n")
+cat("   - For high precision (≥90%): Use threshold around", 
+      if(exists("thresh_precision")) thresh_precision else "N/A", "\n")
+cat("   - For high recall (≥90%): Use threshold around", 
+      if(exists("thresh_recall")) thresh_recall else "N/A", "\n")
+cat("   - Review the threshold analysis plots to find your optimal balance\n\n")
+
+# Determine recommended threshold
+recommended_threshold <- thresh_cost  # Default to cost-optimized
+recommended_reason <- "Cost-optimized threshold minimizes total financial impact"
+
+if (abs(thresh_f1 - thresh_cost) < 0.05) {
+  recommended_threshold <- thresh_f1
+  recommended_reason <- "F1-optimized threshold (similar to cost-optimized, better balance)"
+}
+
+cat("**Final Recommendation**: Threshold =", recommended_threshold, "\n")
+cat("Reason:", recommended_reason, "\n")
+```
+
+## Save Results
+
+```{r save-results}
+# Save threshold analysis results
+readr::write_csv(threshold_results, file.path(paths$tables, "threshold_analysis.csv"))
+readr::write_csv(comparison_optimal, file.path(paths$tables, "optimal_thresholds_comparison.csv"))
+
+# Save optimal threshold info
+optimal_thresholds <- list(
+  max_f1 = list(threshold = thresh_f1, f1 = f1_max),
+  max_f2 = list(threshold = thresh_f2, f2 = f2_max),
+  min_cost = list(threshold = thresh_cost, cost = cost_min),
+  recommended = list(threshold = recommended_threshold, reason = recommended_reason)
+)
+
+saveRDS(optimal_thresholds, file.path(paths$models, "optimal_thresholds.rds"))
+
+cat("=== Results Saved ===\n")
+cat("Threshold analysis:", file.path(paths$tables, "threshold_analysis.csv"), "\n")
+cat("Optimal thresholds comparison:", file.path(paths$tables, "optimal_thresholds_comparison.csv"), "\n")
+cat("Optimal thresholds:", file.path(paths$models, "optimal_thresholds.rds"), "\n")
+```
+
+## Summary
+
+- ✓ Analyzed thresholds from 0.1 to 0.9 (81 thresholds)
+- ✓ Identified optimal thresholds for multiple objectives:
+  - Maximum F1-Score: `r thresh_f1`
+  - Maximum F2-Score (Recall emphasis): `r thresh_f2`
+  - Cost-Optimized: `r thresh_cost`
+- ✓ Created comprehensive visualizations showing precision-recall trade-offs
+- ✓ Generated confusion matrices at optimal thresholds
+- ✓ Provided business-specific recommendations
+- ✓ Saved all analysis results
+
+**Key Finding**: Recommended threshold = `r recommended_threshold` (`r recommended_reason`)
+
+**Next Step**: Proceed to `09_model_interpretation.Rmd` for feature importance and model explainability analysis.

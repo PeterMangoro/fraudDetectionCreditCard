@@ -29,7 +29,8 @@ required_packages <- c(
   # Reporting
   "knitr",           # R Markdown
   "kableExtra",      # Enhanced tables
-  "rmarkdown"        # R Markdown rendering
+  "rmarkdown",       # R Markdown rendering
+  "broom"            # Tidy model outputs
 )
 
 # Function to check and install packages
@@ -64,6 +65,7 @@ suppressPackageStartupMessages({
   library(knitr)
   library(kableExtra)
   library(rmarkdown)
+  library(broom)
 })
 
 # ==============================================================================

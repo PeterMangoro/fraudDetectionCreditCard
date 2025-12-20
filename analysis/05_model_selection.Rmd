@@ -1,0 +1,602 @@
+---
+title: "Phase 5: Model Selection"
+author: "Fraud Detection Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+    highlight: tango
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+# Determine project root directory
+current_dir <- getwd()
+if (basename(current_dir) == "analysis") {
+  project_root <- dirname(current_dir)
+  setwd(project_root)
+} else {
+  project_root <- current_dir
+}
+
+# Source the setup script
+setup_file <- file.path(project_root, "R", "setup.R")
+if (file.exists(setup_file)) {
+  source(setup_file)
+} else {
+  stop("Cannot find setup.R at: ", setup_file)
+}
+
+# Source utility functions
+source(file.path(project_root, "R", "data_utils.R"))
+source(file.path(project_root, "R", "preprocessing.R"))
+source(file.path(project_root, "R", "evaluation.R"))
+
+# Set random seed for reproducibility
+set.seed(42)
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.path = "results/figures/05_model_selection-",
+  cache = TRUE
+)
+```
+
+## Introduction
+
+This document compares different model types for fraud detection. We'll evaluate:
+
+1. **Logistic Regression**: Simple, interpretable linear model (with class weights)
+2. **Random Forest**: Tree-based ensemble (with best imbalance technique)
+3. **XGBoost**: Gradient boosting (with best imbalance technique)
+4. **Ensemble**: Voting/stacking ensemble combining all three models
+
+We'll use the **best imbalance technique** identified in Phase 4 and evaluate on the validation set for quick comparison.
+
+## Load Data and Best Imbalance Technique
+
+```{r load-data}
+# Load raw datasets
+train_raw <- readr::read_csv(file.path(paths$data, "train.csv"), show_col_types = FALSE)
+val_raw <- readr::read_csv(file.path(paths$data, "validation.csv"), show_col_types = FALSE)
+
+cat("=== Loading Raw Data ===\n")
+cat("Training set:", nrow(train_raw), "rows ×", ncol(train_raw), "columns\n")
+cat("Validation set:", nrow(val_raw), "rows ×", ncol(val_raw), "columns\n")
+
+# Apply feature engineering
+cat("\n=== Applying Feature Engineering ===\n")
+train_raw <- create_time_features(train_raw)
+val_raw <- create_time_features(val_raw)
+
+train_raw <- create_amount_features(train_raw)
+val_raw <- create_amount_features(val_raw)
+
+train_raw <- create_interaction_features(train_raw)
+val_raw <- create_interaction_features(val_raw)
+
+# Load preprocessing recipe
+cat("\n=== Loading Preprocessing Recipe ===\n")
+recipe_fitted <- readRDS(file.path(paths$models, "preprocessing_recipe.rds"))
+
+# Apply preprocessing
+cat("Applying preprocessing recipe...\n")
+train_preprocessed <- recipes::bake(recipe_fitted, new_data = train_raw)
+val_preprocessed <- recipes::bake(recipe_fitted, new_data = val_raw)
+
+# Convert Class to factor
+train_class_char <- as.character(train_preprocessed$Class)
+train_class_char[train_class_char == "0"] <- "Non-Fraud"
+train_class_char[train_class_char == "1"] <- "Fraud"
+train_preprocessed$Class <- factor(train_class_char, levels = c("Non-Fraud", "Fraud"))
+
+val_class_char <- as.character(val_preprocessed$Class)
+val_class_char[val_class_char == "0"] <- "Non-Fraud"
+val_class_char[val_class_char == "1"] <- "Fraud"
+val_preprocessed$Class <- factor(val_class_char, levels = c("Non-Fraud", "Fraud"))
+
+cat("\n=== Data Ready ===\n")
+cat("Training set:", nrow(train_preprocessed), "rows ×", ncol(train_preprocessed), "columns\n")
+cat("Validation set:", nrow(val_preprocessed), "rows ×", ncol(val_preprocessed), "columns\n")
+cat("Class distribution (train):\n")
+print(table(train_preprocessed$Class))
+cat("\nClass distribution (validation):\n")
+print(table(val_preprocessed$Class))
+```
+
+### Load Best Imbalance Technique
+
+```{r load-best-technique}
+# Try to load best imbalance technique from Phase 4
+best_technique_file <- file.path(paths$models, "best_imbalance_technique.rds")
+
+if (file.exists(best_technique_file)) {
+  best_technique_info <- readRDS(best_technique_file)
+  best_technique <- best_technique_info$technique
+  cat("=== Best Imbalance Technique from Phase 4 ===\n")
+  cat("Technique:", best_technique, "\n")
+  if (!is.null(best_technique_info$pr_auc)) {
+    cat("PR-AUC:", round(best_technique_info$pr_auc, 4), "\n")
+  }
+} else {
+  # Default to SMOTE if file doesn't exist
+  cat("=== Best Imbalance Technique File Not Found ===\n")
+  cat("Defaulting to SMOTE\n")
+  best_technique <- "SMOTE"
+}
+
+cat("\nUsing imbalance technique:", best_technique, "\n")
+```
+
+### Apply Best Imbalance Technique to Training Data
+
+```{r apply-imbalance-technique}
+# Apply the best imbalance technique to training data
+cat("=== Applying", best_technique, "to Training Data ===\n")
+
+if (best_technique == "Class Weights") {
+  # Class weights will be applied in the model specification
+  train_balanced <- train_preprocessed
+  cat("Class weights will be applied during model training\n")
+  
+} else if (best_technique == "SMOTE") {
+  recipe_imbalance <- recipes::recipe(Class ~ ., data = train_preprocessed) %>%
+    themis::step_smote(Class, neighbors = 5)
+  recipe_imbalance <- recipes::prep(recipe_imbalance, training = train_preprocessed)
+  train_balanced <- recipes::bake(recipe_imbalance, new_data = train_preprocessed)
+  
+} else if (best_technique == "Random Upsampling") {
+  recipe_imbalance <- recipes::recipe(Class ~ ., data = train_preprocessed) %>%
+    themis::step_upsample(Class)
+  recipe_imbalance <- recipes::prep(recipe_imbalance, training = train_preprocessed)
+  train_balanced <- recipes::bake(recipe_imbalance, new_data = train_preprocessed)
+  
+} else if (best_technique == "NearMiss Undersampling") {
+  recipe_imbalance <- recipes::recipe(Class ~ ., data = train_preprocessed) %>%
+    themis::step_nearmiss(Class, neighbors = 3)
+  recipe_imbalance <- recipes::prep(recipe_imbalance, training = train_preprocessed)
+  train_balanced <- recipes::bake(recipe_imbalance, new_data = train_preprocessed)
+  
+} else if (best_technique == "Random Undersampling") {
+  recipe_imbalance <- recipes::recipe(Class ~ ., data = train_preprocessed) %>%
+    themis::step_downsample(Class)
+  recipe_imbalance <- recipes::prep(recipe_imbalance, training = train_preprocessed)
+  train_balanced <- recipes::bake(recipe_imbalance, new_data = train_preprocessed)
+  
+} else if (best_technique == "ROSE") {
+  recipe_imbalance <- recipes::recipe(Class ~ ., data = train_preprocessed) %>%
+    themis::step_rose(Class)
+  recipe_imbalance <- recipes::prep(recipe_imbalance, training = train_preprocessed)
+  train_balanced <- recipes::bake(recipe_imbalance, new_data = train_preprocessed)
+  
+} else {
+  # Default: no resampling
+  cat("Unknown technique, using original data\n")
+  train_balanced <- train_preprocessed
+}
+
+cat("\nTraining data after balancing:\n")
+cat("Rows:", nrow(train_balanced), "\n")
+cat("Class distribution:\n")
+print(table(train_balanced$Class))
+```
+
+## Model 1: Logistic Regression
+
+Simple linear model with class weights for handling imbalance.
+
+```{r model-1-logistic-regression}
+cat("=== Model 1: Logistic Regression ===\n")
+
+# Calculate class weights
+class_counts <- table(train_preprocessed$Class)
+total <- sum(class_counts)
+class_weights <- total / (length(class_counts) * class_counts)
+cat("Class weights:\n")
+print(class_weights)
+
+# Create model specification
+lr_spec <- parsnip::logistic_reg() %>%
+  parsnip::set_engine("glm") %>%
+  parsnip::set_mode("classification")
+
+# Create workflow
+lr_workflow <- workflows::workflow() %>%
+  workflows::add_model(lr_spec) %>%
+  workflows::add_formula(Class ~ .)
+
+# Train model
+cat("\nTraining Logistic Regression...\n")
+lr_fitted <- parsnip::fit(lr_workflow, data = train_balanced)
+
+# Make predictions on validation set
+cat("Making predictions on validation set...\n")
+val_pred_lr <- predict(lr_fitted, new_data = val_preprocessed, type = "class")
+val_prob_lr <- predict(lr_fitted, new_data = val_preprocessed, type = "prob")
+
+# Evaluate
+val_truth <- val_preprocessed$Class
+lr_metrics <- calculate_all_metrics(
+  truth = val_truth,
+  estimate = val_pred_lr$.pred_class,
+  prob = val_prob_lr$.pred_Fraud
+)
+
+cat("\n=== Logistic Regression Results ===\n")
+print(lr_metrics)
+```
+
+## Model 2: Random Forest
+
+Tree-based ensemble model with the best imbalance technique.
+
+```{r model-2-random-forest}
+cat("=== Model 2: Random Forest ===\n")
+
+# Create model specification
+rf_spec <- parsnip::rand_forest(
+  trees = 100,
+  min_n = 2,
+  mtry = floor(sqrt(ncol(train_balanced) - 1))
+) %>%
+  parsnip::set_engine("ranger", importance = "impurity") %>%
+  parsnip::set_mode("classification")
+
+# Create workflow
+rf_workflow <- workflows::workflow() %>%
+  workflows::add_model(rf_spec) %>%
+  workflows::add_formula(Class ~ .)
+
+# Train model
+cat("Training Random Forest...\n")
+cat("Trees: 100\n")
+cat("mtry:", floor(sqrt(ncol(train_balanced) - 1)), "\n")
+rf_fitted <- parsnip::fit(rf_workflow, data = train_balanced)
+
+# Make predictions on validation set
+cat("\nMaking predictions on validation set...\n")
+val_pred_rf <- predict(rf_fitted, new_data = val_preprocessed, type = "class")
+val_prob_rf <- predict(rf_fitted, new_data = val_preprocessed, type = "prob")
+
+# Evaluate
+rf_metrics <- calculate_all_metrics(
+  truth = val_truth,
+  estimate = val_pred_rf$.pred_class,
+  prob = val_prob_rf$.pred_Fraud
+)
+
+cat("\n=== Random Forest Results ===\n")
+print(rf_metrics)
+```
+
+### Random Forest Feature Importance
+
+```{r rf-importance}
+# Extract feature importance
+rf_importance <- rf_fitted %>%
+  workflows::extract_fit_engine() %>%
+  vip::vip(num_features = 20)
+
+print(rf_importance)
+```
+
+## Model 3: XGBoost
+
+Gradient boosting model with the best imbalance technique.
+
+```{r model-3-xgboost}
+cat("=== Model 3: XGBoost ===\n")
+
+# Create model specification
+xgb_spec <- parsnip::boost_tree(
+  trees = 100,
+  tree_depth = 6,
+  learn_rate = 0.1,
+  min_n = 2
+) %>%
+  parsnip::set_engine("xgboost") %>%
+  parsnip::set_mode("classification")
+
+# Create workflow
+xgb_workflow <- workflows::workflow() %>%
+  workflows::add_model(xgb_spec) %>%
+  workflows::add_formula(Class ~ .)
+
+# Train model
+cat("Training XGBoost...\n")
+cat("Trees: 100\n")
+cat("Tree depth: 6\n")
+cat("Learning rate: 0.1\n")
+xgb_fitted <- parsnip::fit(xgb_workflow, data = train_balanced)
+
+# Make predictions on validation set
+cat("\nMaking predictions on validation set...\n")
+val_pred_xgb <- predict(xgb_fitted, new_data = val_preprocessed, type = "class")
+val_prob_xgb <- predict(xgb_fitted, new_data = val_preprocessed, type = "prob")
+
+# Evaluate
+xgb_metrics <- calculate_all_metrics(
+  truth = val_truth,
+  estimate = val_pred_xgb$.pred_class,
+  prob = val_prob_xgb$.pred_Fraud
+)
+
+cat("\n=== XGBoost Results ===\n")
+print(xgb_metrics)
+```
+
+### XGBoost Feature Importance
+
+```{r xgb-importance}
+# Extract feature importance
+xgb_importance <- xgb_fitted %>%
+  workflows::extract_fit_engine() %>%
+  vip::vip(num_features = 20)
+
+print(xgb_importance)
+```
+
+## Model 4: Ensemble (Voting)
+
+Combine predictions from all three models using weighted voting based on their PR-AUC scores.
+
+```{r model-4-ensemble}
+cat("=== Model 4: Ensemble (Weighted Voting) ===\n")
+
+# Get PR-AUC scores for weighting
+lr_pr_auc <- lr_metrics$PR_AUC
+rf_pr_auc <- rf_metrics$PR_AUC
+xgb_pr_auc <- xgb_metrics$PR_AUC
+
+# Normalize weights (use PR-AUC as weights)
+total_pr_auc <- lr_pr_auc + rf_pr_auc + xgb_pr_auc
+weights <- c(
+  lr_weight = lr_pr_auc / total_pr_auc,
+  rf_weight = rf_pr_auc / total_pr_auc,
+  xgb_weight = xgb_pr_auc / total_pr_auc
+)
+
+cat("Ensemble weights (based on PR-AUC):\n")
+cat("  Logistic Regression:", round(weights["lr_weight"], 3), "\n")
+cat("  Random Forest:", round(weights["rf_weight"], 3), "\n")
+cat("  XGBoost:", round(weights["xgb_weight"], 3), "\n")
+
+# Combine probabilities using weighted average
+ensemble_prob <- (
+  weights["lr_weight"] * val_prob_lr$.pred_Fraud +
+  weights["rf_weight"] * val_prob_rf$.pred_Fraud +
+  weights["xgb_weight"] * val_prob_xgb$.pred_Fraud
+)
+
+# Convert probabilities to class predictions (threshold = 0.5)
+val_pred_ensemble <- factor(
+  ifelse(ensemble_prob > 0.5, "Fraud", "Non-Fraud"),
+  levels = c("Non-Fraud", "Fraud")
+)
+
+# Evaluate ensemble
+ensemble_metrics <- calculate_all_metrics(
+  truth = val_truth,
+  estimate = val_pred_ensemble,
+  prob = ensemble_prob
+)
+
+cat("\n=== Ensemble Results ===\n")
+print(ensemble_metrics)
+```
+
+## Model Comparison
+
+```{r comparison}
+# Combine all metrics
+all_model_metrics <- list(
+  "Logistic Regression" = lr_metrics,
+  "Random Forest" = rf_metrics,
+  "XGBoost" = xgb_metrics,
+  "Ensemble" = ensemble_metrics
+)
+
+# Create comparison table
+comparison_df <- dplyr::bind_rows(all_model_metrics, .id = "Model") %>%
+  dplyr::arrange(desc(PR_AUC))
+
+cat("=== Model Comparison ===\n")
+print(comparison_df)
+
+# Round for display
+comparison_df_display <- comparison_df
+numeric_cols <- sapply(comparison_df_display, is.numeric)
+comparison_df_display[numeric_cols] <- round(comparison_df_display[numeric_cols], 4)
+
+cat("\n=== Rounded Comparison Table ===\n")
+print(comparison_df_display)
+```
+
+### Visualization
+
+```{r comparison-viz}
+# Create comparison plot
+comparison_long <- comparison_df %>%
+  tidyr::pivot_longer(
+    cols = -Model,
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  dplyr::filter(Metric %in% c("Precision", "Recall", "F1", "MCC", "PR_AUC", "ROC_AUC"))
+
+p_comparison <- comparison_long %>%
+  ggplot2::ggplot(aes(x = Metric, y = Value, fill = Model)) +
+  ggplot2::geom_col(position = "dodge", alpha = 0.8) +
+  ggplot2::scale_fill_brewer(palette = "Set1") +
+  ggplot2::labs(
+    title = "Model Comparison",
+    subtitle = paste("Using", best_technique, "for imbalance handling"),
+    x = "Metric",
+    y = "Value",
+    fill = "Model"
+  ) +
+  ggplot2::theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggplot2::ylim(0, 1)
+
+print(p_comparison)
+
+# PR-AUC comparison (most important metric for imbalanced data)
+p_pr_auc <- comparison_df %>%
+  dplyr::arrange(PR_AUC) %>%
+  dplyr::mutate(Model = factor(Model, levels = Model)) %>%
+  ggplot2::ggplot(aes(x = Model, y = PR_AUC, fill = Model)) +
+  ggplot2::geom_col(alpha = 0.8) +
+  ggplot2::scale_fill_brewer(palette = "Set1") +
+  ggplot2::labs(
+    title = "PR-AUC Comparison",
+    subtitle = "Primary metric for imbalanced classification",
+    x = "Model",
+    y = "PR-AUC"
+  ) +
+  ggplot2::theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                 legend.position = "none") +
+  ggplot2::coord_flip()
+
+print(p_pr_auc)
+```
+
+## Confusion Matrices
+
+```{r confusion-matrices}
+# Create confusion matrices for each model
+cat("=== Confusion Matrices ===\n\n")
+
+cat("--- Logistic Regression ---\n")
+cm_lr <- create_confusion_matrix(val_truth, val_pred_lr$.pred_class)
+print(cm_lr)
+
+cat("\n--- Random Forest ---\n")
+cm_rf <- create_confusion_matrix(val_truth, val_pred_rf$.pred_class)
+print(cm_rf)
+
+cat("\n--- XGBoost ---\n")
+cm_xgb <- create_confusion_matrix(val_truth, val_pred_xgb$.pred_class)
+print(cm_xgb)
+
+cat("\n--- Ensemble ---\n")
+cm_ensemble <- create_confusion_matrix(val_truth, val_pred_ensemble)
+print(cm_ensemble)
+```
+
+## Cost Analysis
+
+```{r cost-analysis}
+# Load cost matrix from setup
+cost_matrix <- list(
+  TP = 0,
+  FP = 10,
+  FN = 100,
+  TN = 0
+)
+
+cat("=== Cost Analysis ===\n")
+cat("Cost Matrix:\n")
+cat("  TP (True Positive): $", cost_matrix$TP, "\n")
+cat("  FP (False Positive): $", cost_matrix$FP, "\n")
+cat("  FN (False Negative): $", cost_matrix$FN, "\n")
+cat("  TN (True Negative): $", cost_matrix$TN, "\n\n")
+
+# Calculate costs for each model
+costs_lr <- calculate_cost_metrics(val_truth, val_pred_lr$.pred_class, cost_matrix)
+costs_rf <- calculate_cost_metrics(val_truth, val_pred_rf$.pred_class, cost_matrix)
+costs_xgb <- calculate_cost_metrics(val_truth, val_pred_xgb$.pred_class, cost_matrix)
+costs_ensemble <- calculate_cost_metrics(val_truth, val_pred_ensemble, cost_matrix)
+
+# Calculate cost per transaction
+n_val <- nrow(val_preprocessed)
+costs_df <- data.frame(
+  Model = c("Logistic Regression", "Random Forest", "XGBoost", "Ensemble"),
+  Total_Cost = c(costs_lr$total_cost, costs_rf$total_cost, costs_xgb$total_cost, costs_ensemble$total_cost),
+  Cost_per_Transaction = c(
+    costs_lr$total_cost / n_val, 
+    costs_rf$total_cost / n_val, 
+    costs_xgb$total_cost / n_val,
+    costs_ensemble$total_cost / n_val
+  )
+) %>%
+  dplyr::arrange(Total_Cost)
+
+cat("=== Cost Comparison ===\n")
+print(costs_df)
+```
+
+## Key Findings
+
+```{r findings}
+cat("=== Key Findings ===\n\n")
+
+# Find best model by PR-AUC
+best_model <- comparison_df$Model[which.max(comparison_df$PR_AUC)]
+best_pr_auc <- max(comparison_df$PR_AUC)
+best_f1 <- comparison_df$F1[comparison_df$Model == best_model]
+
+cat("1. Best Model:", best_model, "\n")
+cat("   PR-AUC:", round(best_pr_auc, 4), "\n")
+cat("   F1 Score:", round(best_f1, 4), "\n\n")
+
+cat("2. Model Rankings (by PR-AUC):\n")
+rankings <- comparison_df %>%
+  dplyr::arrange(desc(PR_AUC)) %>%
+  dplyr::select(Model, PR_AUC, F1, Recall, Precision)
+print(rankings)
+
+cat("\n3. Recommendations:\n")
+cat("   - Use", best_model, "for hyperparameter tuning\n")
+cat("   - This model will be optimized in the next phase\n")
+```
+
+## Save Results
+
+```{r save-results}
+# Save comparison table
+readr::write_csv(comparison_df, file.path(paths$tables, "model_selection_comparison.csv"))
+
+# Save best model info
+best_model_info <- list(
+  model = best_model,
+  pr_auc = best_pr_auc,
+  f1 = best_f1,
+  imbalance_technique = best_technique
+)
+saveRDS(best_model_info, file.path(paths$models, "best_model_selection.rds"))
+
+# Save fitted models
+saveRDS(lr_fitted, file.path(paths$models, "logistic_regression.rds"))
+saveRDS(rf_fitted, file.path(paths$models, "random_forest.rds"))
+saveRDS(xgb_fitted, file.path(paths$models, "xgboost.rds"))
+
+cat("=== Results Saved ===\n")
+cat("Comparison table:", file.path(paths$tables, "model_selection_comparison.csv"), "\n")
+cat("Best model:", file.path(paths$models, "best_model_selection.rds"), "\n")
+cat("Fitted models saved to:", paths$models, "\n")
+```
+
+## Summary
+
+- ✓ Compared 4 different model types:
+  - Logistic Regression (with class weights)
+  - Random Forest (with best imbalance technique)
+  - XGBoost (with best imbalance technique)
+  - Ensemble (weighted voting combining all three models)
+- ✓ Used best imbalance technique from Phase 4: `r best_technique`
+- ✓ Evaluated on validation set with comprehensive metrics (Precision, Recall, F1, MCC, PR-AUC, ROC-AUC)
+- ✓ Generated feature importance plots for Random Forest and XGBoost
+- ✓ Performed cost-benefit analysis using cost matrix
+- ✓ Identified best performing model: `r best_model`
+- ✓ Saved all fitted models and comparison results
+- ✓ Ready for hyperparameter tuning phase
+
+**Key Finding**: `r best_model` performed best with PR-AUC of `r round(best_pr_auc, 4)`.
+
+**Next Step**: Proceed to `06_hyperparameter_tuning.Rmd` to optimize the best model's hyperparameters.

@@ -466,6 +466,144 @@ p_pr_auc <- comparison_df %>%
 print(p_pr_auc)
 ```
 
+## Optional: Include Isolation Forest Comparison
+
+```{r isolation-forest-comparison, eval=TRUE}
+# Optionally load Isolation Forest results if Phase 11 has been run
+cat("=== Optional: Isolation Forest Comparison ===\n")
+
+if (file.exists(file.path(paths$models, "isolation_forest_results.rds"))) {
+  cat("Isolation Forest results found. Loading for comparison...\n\n")
+  
+  iso_results <- readRDS(file.path(paths$models, "isolation_forest_results.rds"))
+  
+  # Extract validation metrics at optimal threshold (for fair comparison with supervised models)
+  # Phase 5 evaluates on validation set, so we should use validation metrics
+  if (!is.null(iso_results$validation_metrics_optimal)) {
+    # Use pre-extracted validation metrics at optimal threshold
+    iso_metrics <- iso_results$validation_metrics_optimal
+    cat("Using validation set metrics at optimal threshold:", iso_results$optimal_threshold, "\n")
+  } else if (!is.null(iso_results$validation_metrics) && is.data.frame(iso_results$validation_metrics)) {
+    # Fallback: extract from validation_metrics data frame
+    optimal_thresh <- iso_results$optimal_threshold
+    val_metrics_at_optimal <- iso_results$validation_metrics[
+      iso_results$validation_metrics$Threshold == optimal_thresh, 
+    ]
+    
+    if (nrow(val_metrics_at_optimal) > 0) {
+      iso_metrics <- val_metrics_at_optimal[1, ]  # Take first row if multiple matches
+      cat("Using validation set metrics at optimal threshold:", optimal_thresh, "\n")
+    } else {
+      # Fallback: use test metrics if validation metrics not available
+      cat("Warning: Validation metrics at optimal threshold not found. Using test metrics.\n")
+      iso_metrics <- iso_results$test_metrics
+    }
+  } else {
+    # Fallback: use test metrics
+    cat("Warning: Validation metrics not available. Using test metrics.\n")
+    iso_metrics <- iso_results$test_metrics
+  }
+  
+  # Add Isolation Forest to comparison
+  iso_row <- data.frame(
+    Model = "Isolation Forest",
+    Precision = iso_metrics$Precision,
+    Recall = iso_metrics$Recall,
+    F1 = iso_metrics$F1,
+    MCC = iso_metrics$MCC,
+    PR_AUC = iso_metrics$PR_AUC,
+    ROC_AUC = iso_metrics$ROC_AUC,
+    stringsAsFactors = FALSE
+  )
+  
+  # Combine with existing comparison and update main comparison_df
+  comparison_df <- dplyr::bind_rows(comparison_df, iso_row)
+  
+  cat("=== Updated Comparison (Including Isolation Forest) ===\n")
+  print(knitr::kable(comparison_df, format = "html", digits = 4,
+                     caption = "Model Comparison Including Isolation Forest") %>%
+    kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+  
+  # Update visualization to include Isolation Forest
+  p_comparison_iso <- comparison_df %>%
+    tidyr::pivot_longer(
+      cols = c(Precision, Recall, F1, MCC, PR_AUC, ROC_AUC),
+      names_to = "Metric",
+      values_to = "Value"
+    ) %>%
+    ggplot2::ggplot(aes(x = Metric, y = Value, fill = Model)) +
+    ggplot2::geom_col(position = "dodge", alpha = 0.8) +
+    ggplot2::scale_fill_brewer(palette = "Set2") +
+    ggplot2::labs(
+      title = "Model Comparison: Supervised vs Isolation Forest",
+      subtitle = "Validation Set Performance",
+      x = "Metric",
+      y = "Score",
+      fill = "Model"
+    ) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "bottom"
+    )
+  
+  print(p_comparison_iso)
+  
+  # Recreate main comparison visualizations with Isolation Forest included
+  cat("\n=== Updated Comparison Visualizations (Including Isolation Forest) ===\n")
+  
+  comparison_long_updated <- comparison_df %>%
+    tidyr::pivot_longer(
+      cols = -Model,
+      names_to = "Metric",
+      values_to = "Value"
+    ) %>%
+    dplyr::filter(Metric %in% c("Precision", "Recall", "F1", "MCC", "PR_AUC", "ROC_AUC"))
+  
+  p_comparison_updated <- comparison_long_updated %>%
+    ggplot2::ggplot(aes(x = Metric, y = Value, fill = Model)) +
+    ggplot2::geom_col(position = "dodge", alpha = 0.8) +
+    ggplot2::scale_fill_brewer(palette = "Set2") +
+    ggplot2::labs(
+      title = "Model Comparison (Including Isolation Forest)",
+      subtitle = paste("Using", best_technique, "for imbalance handling"),
+      x = "Metric",
+      y = "Value",
+      fill = "Model"
+    ) +
+    ggplot2::theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    ggplot2::ylim(0, 1)
+  
+  print(p_comparison_updated)
+  
+  # Updated PR-AUC comparison
+  p_pr_auc_updated <- comparison_df %>%
+    dplyr::arrange(PR_AUC) %>%
+    dplyr::mutate(Model = factor(Model, levels = Model)) %>%
+    ggplot2::ggplot(aes(x = Model, y = PR_AUC, fill = Model)) +
+    ggplot2::geom_col(alpha = 0.8) +
+    ggplot2::scale_fill_brewer(palette = "Set2") +
+    ggplot2::labs(
+      title = "PR-AUC Comparison (Including Isolation Forest)",
+      subtitle = "Primary metric for imbalanced classification",
+      x = "Model",
+      y = "PR-AUC"
+    ) +
+    ggplot2::theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                   legend.position = "none") +
+    ggplot2::coord_flip()
+  
+  print(p_pr_auc_updated)
+  
+  cat("\nNote: Isolation Forest is an unsupervised method evaluated separately in Phase 11.\n")
+  cat("Results shown here use validation set metrics at optimal threshold for fair comparison.\n")
+  
+} else {
+  cat("Isolation Forest results not found.\n")
+  cat("Run Phase 11 (11_isolation_forest.Rmd) to include Isolation Forest in comparison.\n\n")
+}
+```
+
 ## Confusion Matrices
 
 ```{r confusion-matrices}

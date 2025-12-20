@@ -1,0 +1,595 @@
+---
+title: "Phase 11: Isolation Forest Analysis"
+author: "Fraud Detection Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+    highlight: tango
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+# Determine project root directory
+current_dir <- getwd()
+if (basename(current_dir) == "analysis") {
+  project_root <- dirname(current_dir)
+  setwd(project_root)
+} else {
+  project_root <- current_dir
+}
+
+# Source the setup script
+setup_file <- file.path(project_root, "R", "setup.R")
+if (file.exists(setup_file)) {
+  source(setup_file)
+} else {
+  stop("Cannot find setup.R at: ", setup_file)
+}
+
+# Source utility functions
+source(file.path(project_root, "R", "data_utils.R"))
+source(file.path(project_root, "R", "preprocessing.R"))
+source(file.path(project_root, "R", "evaluation.R"))
+
+# Set random seed for reproducibility
+set.seed(42)
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.path = "results/figures/11_isolation_forest-",
+  cache = TRUE
+)
+```
+
+## Introduction
+
+This document implements and evaluates **Isolation Forest**, an unsupervised anomaly detection algorithm, for fraud detection. Isolation Forest is particularly well-suited for fraud detection because:
+
+1. **Unsupervised Learning**: Works without labeled fraud data during training
+2. **Scalability**: Efficient for large-scale transaction monitoring
+3. **Anomaly Detection**: Specifically designed to identify outliers and anomalies
+4. **No Distribution Assumptions**: Makes no assumptions about data distribution
+
+We'll compare Isolation Forest's performance with the supervised models evaluated in Phase 5 (Logistic Regression, Random Forest, XGBoost) to assess its effectiveness for fraud detection.
+
+## Load Data
+
+```{r load-data}
+# Load raw datasets
+train_raw <- readr::read_csv(file.path(paths$data, "train.csv"), show_col_types = FALSE)
+val_raw <- readr::read_csv(file.path(paths$data, "validation.csv"), show_col_types = FALSE)
+test_raw <- readr::read_csv(file.path(paths$data, "test.csv"), show_col_types = FALSE)
+
+cat("=== Loading Raw Data ===\n")
+cat("Training set:", nrow(train_raw), "rows ×", ncol(train_raw), "columns\n")
+cat("Validation set:", nrow(val_raw), "rows ×", ncol(val_raw), "columns\n")
+cat("Test set:", nrow(test_raw), "rows ×", ncol(test_raw), "columns\n")
+
+# Apply feature engineering
+cat("\n=== Applying Feature Engineering ===\n")
+train_raw <- create_time_features(train_raw)
+val_raw <- create_time_features(val_raw)
+test_raw <- create_time_features(test_raw)
+
+train_raw <- create_amount_features(train_raw)
+val_raw <- create_amount_features(val_raw)
+test_raw <- create_amount_features(test_raw)
+
+train_raw <- create_interaction_features(train_raw)
+val_raw <- create_interaction_features(val_raw)
+test_raw <- create_interaction_features(test_raw)
+
+# Load preprocessing recipe
+cat("\n=== Loading Preprocessing Recipe ===\n")
+recipe_fitted <- readRDS(file.path(paths$models, "preprocessing_recipe.rds"))
+
+# Apply preprocessing
+cat("Applying preprocessing recipe...\n")
+train_preprocessed <- recipes::bake(recipe_fitted, new_data = train_raw)
+val_preprocessed <- recipes::bake(recipe_fitted, new_data = val_raw)
+test_preprocessed <- recipes::bake(recipe_fitted, new_data = test_raw)
+
+# Convert Class to factor for evaluation
+train_class_char <- as.character(train_preprocessed$Class)
+train_class_char[train_class_char == "0"] <- "Non-Fraud"
+train_class_char[train_class_char == "1"] <- "Fraud"
+train_preprocessed$Class <- factor(train_class_char, levels = c("Non-Fraud", "Fraud"))
+
+val_class_char <- as.character(val_preprocessed$Class)
+val_class_char[val_class_char == "0"] <- "Non-Fraud"
+val_class_char[val_class_char == "1"] <- "Fraud"
+val_preprocessed$Class <- factor(val_class_char, levels = c("Non-Fraud", "Fraud"))
+
+test_class_char <- as.character(test_preprocessed$Class)
+test_class_char[test_class_char == "0"] <- "Non-Fraud"
+test_class_char[test_class_char == "1"] <- "Fraud"
+test_preprocessed$Class <- factor(test_class_char, levels = c("Non-Fraud", "Fraud"))
+
+cat("\n=== Data Ready ===\n")
+cat("Training samples:", nrow(train_preprocessed), "\n")
+cat("Validation samples:", nrow(val_preprocessed), "\n")
+cat("Test samples:", nrow(test_preprocessed), "\n")
+cat("Fraud rate (train):", round(100 * mean(train_preprocessed$Class == "Fraud"), 2), "%\n")
+cat("Fraud rate (validation):", round(100 * mean(val_preprocessed$Class == "Fraud"), 2), "%\n")
+cat("Fraud rate (test):", round(100 * mean(test_preprocessed$Class == "Fraud"), 2), "%\n")
+```
+
+## Isolation Forest Methodology
+
+### Algorithm Overview
+
+Isolation Forest isolates anomalies by randomly selecting a feature and then randomly selecting a split value between the maximum and minimum values of the selected feature. Since anomalies are few and different, they are more likely to be isolated with fewer splits, resulting in shorter path lengths in the isolation tree.
+
+**Key Parameters:**
+- **`ntrees`**: Number of isolation trees (default: 100)
+- **`sample_size`**: Number of samples to draw for each tree (default: 256)
+- **`max_depth`**: Maximum depth of trees (default: ceiling(log2(sample_size)))
+- **`contamination`**: Expected proportion of anomalies (optional, for threshold setting)
+
+### Training Strategy
+
+For fraud detection, we'll train Isolation Forest on **normal (non-fraud) transactions only**, allowing it to learn the patterns of legitimate transactions. Transactions that deviate significantly from these patterns will be flagged as anomalies (potential fraud).
+
+```{r isolation-forest-methodology}
+cat("=== Isolation Forest Training Strategy ===\n\n")
+cat("1. Train on normal transactions only (unsupervised learning)\n")
+cat("2. Use anomaly scores to identify fraudulent transactions\n")
+cat("3. Lower scores indicate higher anomaly (more likely fraud)\n")
+cat("4. Convert anomaly scores to probabilities for comparison\n\n")
+
+# Prepare training data (only non-fraud transactions)
+train_normal <- train_preprocessed[train_preprocessed$Class == "Non-Fraud", ]
+X_train <- train_normal %>% dplyr::select(-Class)
+
+cat("Training on", nrow(train_normal), "normal transactions\n")
+cat("Features:", ncol(X_train), "\n")
+```
+
+## Train Isolation Forest Model
+
+```{r train-isolation-forest}
+cat("=== Training Isolation Forest ===\n")
+
+# Train Isolation Forest on normal transactions
+# Using isotree package which provides efficient implementation
+iso_forest <- isolation.forest(
+  X_train,
+  ntrees = 100,              # Number of trees
+  sample_size = min(256, nrow(X_train)),  # Samples per tree
+  max_depth = ceiling(log2(min(256, nrow(X_train)))),  # Max depth
+  nthreads = 1,             # Single thread for reproducibility
+  seed = 42
+)
+
+cat("\n=== Model Trained Successfully ===\n")
+cat("Number of trees:", iso_forest$ntrees, "\n")
+cat("Sample size:", iso_forest$sample_size, "\n")
+cat("Max depth:", iso_forest$max_depth, "\n")
+```
+
+## Generate Predictions
+
+```{r generate-predictions}
+cat("=== Generating Predictions ===\n")
+
+# Prepare validation and test data (remove Class column)
+X_val <- val_preprocessed %>% dplyr::select(-Class)
+X_test <- test_preprocessed %>% dplyr::select(-Class)
+
+# Get anomaly scores (lower scores = more anomalous = more likely fraud)
+cat("\nCalculating anomaly scores...\n")
+val_scores <- predict(iso_forest, X_val)
+test_scores <- predict(iso_forest, X_test)
+
+# Convert scores to probabilities
+# Isolation Forest scores range from 0 to 1, where lower scores indicate anomalies
+# For fraud detection, we want to convert: lower score -> higher fraud probability
+# We'll use: prob_fraud = 1 - score (normalized)
+val_scores_normalized <- (val_scores - min(val_scores)) / (max(val_scores) - min(val_scores))
+test_scores_normalized <- (test_scores - min(test_scores)) / (max(test_scores) - min(test_scores))
+
+# Convert to fraud probability (lower anomaly score = higher fraud probability)
+val_prob_fraud <- 1 - val_scores_normalized
+test_prob_fraud <- 1 - test_scores_normalized
+
+cat("\n=== Score Statistics ===\n")
+cat("Validation scores - Min:", round(min(val_scores), 4), 
+    "Max:", round(max(val_scores), 4), 
+    "Mean:", round(mean(val_scores), 4), "\n")
+cat("Test scores - Min:", round(min(test_scores), 4), 
+    "Max:", round(max(test_scores), 4), 
+    "Mean:", round(mean(test_scores), 4), "\n")
+
+# Create data frames for evaluation
+val_truth <- val_preprocessed$Class
+test_truth <- test_preprocessed$Class
+
+# Create probability data frame (similar to tidymodels output)
+val_prob_df <- data.frame(
+  .pred_Non_Fraud = 1 - val_prob_fraud,
+  .pred_Fraud = val_prob_fraud
+)
+
+test_prob_df <- data.frame(
+  .pred_Non_Fraud = 1 - test_prob_fraud,
+  .pred_Fraud = test_prob_fraud
+)
+```
+
+## Evaluate on Validation Set
+
+```{r evaluate-validation}
+cat("=== Validation Set Evaluation ===\n")
+
+# Calculate metrics at different thresholds
+thresholds <- c(0.3, 0.4, 0.5, 0.6, 0.7)
+val_metrics_list <- list()
+
+for (thresh in thresholds) {
+  val_pred <- ifelse(val_prob_fraud >= thresh, "Fraud", "Non-Fraud")
+  val_pred_factor <- factor(val_pred, levels = c("Non-Fraud", "Fraud"))
+  
+  metrics <- calculate_all_metrics(
+    truth = val_truth,
+    estimate = val_pred_factor,
+    prob = val_prob_fraud
+  )
+  
+  metrics$Threshold <- thresh
+  val_metrics_list[[as.character(thresh)]] <- metrics
+}
+
+val_metrics_df <- dplyr::bind_rows(val_metrics_list)
+
+# Find optimal threshold (maximize F1 score)
+optimal_idx <- which.max(val_metrics_df$F1)
+optimal_threshold <- val_metrics_df$Threshold[optimal_idx]
+
+cat("\n=== Optimal Threshold (Validation Set) ===\n")
+cat("Threshold:", optimal_threshold, "\n")
+cat("F1 Score:", round(val_metrics_df$F1[optimal_idx], 4), "\n")
+cat("Precision:", round(val_metrics_df$Precision[optimal_idx], 4), "\n")
+cat("Recall:", round(val_metrics_df$Recall[optimal_idx], 4), "\n")
+cat("PR-AUC:", round(val_metrics_df$PR_AUC[optimal_idx], 4), "\n")
+cat("ROC-AUC:", round(val_metrics_df$ROC_AUC[optimal_idx], 4), "\n")
+
+# Print metrics at optimal threshold
+cat("\n=== Metrics at Optimal Threshold ===\n")
+print(val_metrics_df[optimal_idx, ])
+```
+
+## Evaluate on Test Set
+
+```{r evaluate-test}
+cat("=== Test Set Evaluation ===\n")
+
+# Use optimal threshold from validation set
+test_pred <- ifelse(test_prob_fraud >= optimal_threshold, "Fraud", "Non-Fraud")
+test_pred_factor <- factor(test_pred, levels = c("Non-Fraud", "Fraud"))
+
+# Calculate comprehensive metrics
+test_metrics <- calculate_all_metrics(
+  truth = test_truth,
+  estimate = test_pred_factor,
+  prob = test_prob_fraud
+)
+
+cat("\n=== Test Set Performance ===\n")
+print(test_metrics)
+
+# Create confusion matrix
+conf_matrix <- create_confusion_matrix(test_truth, test_pred_factor)
+cat("\n=== Confusion Matrix ===\n")
+print(conf_matrix)
+```
+
+## Comparison with Supervised Models
+
+```{r compare-models}
+cat("=== Comparison with Supervised Models ===\n")
+
+# Load supervised model results if available
+comparison_data <- list()
+
+# Isolation Forest results
+comparison_data[["Isolation Forest"]] <- data.frame(
+  Model = "Isolation Forest",
+  Precision = test_metrics$Precision,
+  Recall = test_metrics$Recall,
+  F1 = test_metrics$F1,
+  MCC = test_metrics$MCC,
+  PR_AUC = test_metrics$PR_AUC,
+  ROC_AUC = test_metrics$ROC_AUC,
+  stringsAsFactors = FALSE
+)
+
+# Try to load supervised model results
+if (file.exists(file.path(paths$tables, "model_selection_comparison.csv"))) {
+  supervised_results <- readr::read_csv(
+    file.path(paths$tables, "model_selection_comparison.csv"),
+    show_col_types = FALSE
+  )
+  
+  # Standardize column names
+  if ("Model" %in% colnames(supervised_results)) {
+    supervised_comparison <- supervised_results %>%
+      dplyr::select(Model, Precision, Recall, F1, MCC, PR_AUC, ROC_AUC) %>%
+      dplyr::mutate(Model = as.character(Model))
+    
+    # Combine with Isolation Forest
+    full_comparison <- dplyr::bind_rows(
+      comparison_data[["Isolation Forest"]],
+      supervised_comparison
+    )
+    
+    cat("\n=== Full Model Comparison ===\n")
+    print(knitr::kable(full_comparison, format = "html", digits = 4, 
+                       caption = "Comparison: Isolation Forest vs Supervised Models") %>%
+      kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+    
+    # Visualize comparison
+    comparison_long <- full_comparison %>%
+      tidyr::pivot_longer(
+        cols = c(Precision, Recall, F1, MCC, PR_AUC, ROC_AUC),
+        names_to = "Metric",
+        values_to = "Value"
+      )
+    
+    p_comparison <- comparison_long %>%
+      ggplot2::ggplot(aes(x = Metric, y = Value, fill = Model)) +
+      ggplot2::geom_col(position = "dodge", alpha = 0.8) +
+      ggplot2::scale_fill_brewer(palette = "Set2") +
+      ggplot2::labs(
+        title = "Model Comparison: Isolation Forest vs Supervised Models",
+        subtitle = "Test Set Performance",
+        x = "Metric",
+        y = "Score",
+        fill = "Model"
+      ) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom"
+      )
+    
+    print(p_comparison)
+  }
+} else {
+  cat("\nSupervised model results not found. Run Phase 5 first for comparison.\n")
+  print(knitr::kable(comparison_data[["Isolation Forest"]], format = "html", digits = 4))
+}
+```
+
+## Visualization: Anomaly Score Distribution
+
+```{r visualize-scores}
+cat("=== Anomaly Score Visualization ===\n")
+
+# Create visualization of anomaly scores by class
+score_viz_data <- data.frame(
+  Score = c(val_scores, test_scores),
+  Class = c(as.character(val_truth), as.character(test_truth)),
+  Dataset = c(rep("Validation", length(val_scores)), rep("Test", length(test_scores)))
+)
+
+p_scores <- score_viz_data %>%
+  ggplot2::ggplot(aes(x = Score, fill = Class)) +
+  ggplot2::geom_histogram(alpha = 0.7, bins = 50, position = "identity") +
+  ggplot2::facet_wrap(~ Dataset, scales = "free_y") +
+  ggplot2::scale_fill_manual(values = c("Non-Fraud" = "steelblue", "Fraud" = "coral")) +
+  ggplot2::labs(
+    title = "Isolation Forest Anomaly Score Distribution",
+    subtitle = "Lower scores indicate higher anomaly (more likely fraud)",
+    x = "Anomaly Score",
+    y = "Frequency",
+    fill = "Class"
+  ) +
+  ggplot2::theme_minimal()
+
+print(p_scores)
+
+# Density plot
+p_density <- score_viz_data %>%
+  ggplot2::ggplot(aes(x = Score, fill = Class)) +
+  ggplot2::geom_density(alpha = 0.6) +
+  ggplot2::facet_wrap(~ Dataset) +
+  ggplot2::scale_fill_manual(values = c("Non-Fraud" = "steelblue", "Fraud" = "coral")) +
+  ggplot2::labs(
+    title = "Anomaly Score Density by Class",
+    x = "Anomaly Score",
+    y = "Density",
+    fill = "Class"
+  ) +
+  ggplot2::theme_minimal()
+
+print(p_density)
+```
+
+## Precision-Recall and ROC Curves
+
+```{r pr-roc-curves}
+cat("=== Precision-Recall and ROC Curves ===\n")
+
+# Precision-Recall Curve
+pr_data <- data.frame(
+  truth = test_truth,
+  estimate = test_prob_fraud
+)
+pr_curve <- yardstick::pr_curve(pr_data, truth, estimate)
+pr_auc <- yardstick::pr_auc(pr_data, truth, estimate)
+
+p_pr <- pr_curve %>%
+  ggplot2::ggplot(aes(x = recall, y = precision)) +
+  ggplot2::geom_path(linewidth = 1, color = "steelblue") +
+  ggplot2::geom_abline(linetype = "dashed", color = "gray") +
+  ggplot2::labs(
+    title = "Precision-Recall Curve: Isolation Forest",
+    subtitle = paste("PR-AUC =", round(pr_auc$.estimate, 4)),
+    x = "Recall",
+    y = "Precision"
+  ) +
+  ggplot2::theme_minimal() +
+  ggplot2::coord_fixed()
+
+print(p_pr)
+
+# ROC Curve
+roc_data <- data.frame(
+  truth = test_truth,
+  estimate = test_prob_fraud
+)
+roc_curve <- yardstick::roc_curve(roc_data, truth, estimate)
+roc_auc <- yardstick::roc_auc(roc_data, truth, estimate)
+
+p_roc <- roc_curve %>%
+  ggplot2::ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  ggplot2::geom_path(linewidth = 1, color = "steelblue") +
+  ggplot2::geom_abline(linetype = "dashed", color = "gray") +
+  ggplot2::labs(
+    title = "ROC Curve: Isolation Forest",
+    subtitle = paste("ROC-AUC =", round(roc_auc$.estimate, 4)),
+    x = "1 - Specificity (False Positive Rate)",
+    y = "Sensitivity (True Positive Rate)"
+  ) +
+  ggplot2::theme_minimal() +
+  ggplot2::coord_fixed()
+
+print(p_roc)
+```
+
+## Threshold Analysis
+
+```{r threshold-analysis}
+cat("=== Threshold Analysis ===\n")
+
+# Calculate metrics at multiple thresholds
+thresholds_analysis <- seq(0.1, 0.9, by = 0.05)
+threshold_results <- data.frame(
+  Threshold = numeric(),
+  Precision = numeric(),
+  Recall = numeric(),
+  F1 = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (thresh in thresholds_analysis) {
+  pred <- ifelse(test_prob_fraud >= thresh, "Fraud", "Non-Fraud")
+  pred_factor <- factor(pred, levels = c("Non-Fraud", "Fraud"))
+  
+  prec <- yardstick::precision_vec(test_truth, pred_factor)
+  rec <- yardstick::recall_vec(test_truth, pred_factor)
+  f1 <- yardstick::f_meas_vec(test_truth, pred_factor)
+  
+  threshold_results <- rbind(threshold_results, data.frame(
+    Threshold = thresh,
+    Precision = prec,
+    Recall = rec,
+    F1 = f1
+  ))
+}
+
+# Visualize threshold trade-offs
+p_threshold <- threshold_results %>%
+  tidyr::pivot_longer(
+    cols = c(Precision, Recall, F1),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  ggplot2::ggplot(aes(x = Threshold, y = Value, color = Metric)) +
+  ggplot2::geom_line(linewidth = 1) +
+  ggplot2::geom_vline(xintercept = optimal_threshold, linetype = "dashed", color = "red") +
+  ggplot2::scale_color_brewer(palette = "Set1") +
+  ggplot2::labs(
+    title = "Threshold Analysis: Precision-Recall Trade-off",
+    subtitle = paste("Optimal Threshold:", optimal_threshold, "(dashed line)"),
+    x = "Threshold",
+    y = "Score",
+    color = "Metric"
+  ) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(legend.position = "bottom")
+
+print(p_threshold)
+```
+
+## Key Findings and Insights
+
+```{r insights}
+cat("=== Key Findings ===\n\n")
+
+cat("1. **Isolation Forest Performance**:\n")
+cat("   - PR-AUC:", round(test_metrics$PR_AUC, 4), "\n")
+cat("   - ROC-AUC:", round(test_metrics$ROC_AUC, 4), "\n")
+cat("   - F1 Score:", round(test_metrics$F1, 4), "\n")
+cat("   - Optimal Threshold:", optimal_threshold, "\n\n")
+
+cat("2. **Advantages of Isolation Forest**:\n")
+cat("   - Unsupervised learning: No labeled fraud data required for training\n")
+cat("   - Scalable: Efficient for large-scale transaction monitoring\n")
+cat("   - Fast training and prediction\n")
+cat("   - No distribution assumptions\n\n")
+
+cat("3. **Limitations**:\n")
+cat("   - Lower interpretability compared to tree-based models\n")
+cat("   - Requires threshold tuning for optimal performance\n")
+cat("   - May produce false positives on legitimate but unusual transactions\n\n")
+
+cat("4. **Use Cases**:\n")
+cat("   - Real-time fraud detection in high-volume systems\n")
+cat("   - Initial screening before supervised model review\n")
+cat("   - Complementary to supervised models in ensemble approaches\n\n")
+```
+
+## Save Results
+
+```{r save-results}
+# Save Isolation Forest model
+saveRDS(iso_forest, file.path(paths$models, "isolation_forest.rds"))
+
+# Save results
+# Extract validation metrics at optimal threshold for easy access
+val_metrics_optimal <- val_metrics_df[val_metrics_df$Threshold == optimal_threshold, ]
+
+isolation_forest_results <- list(
+  model = iso_forest,
+  optimal_threshold = optimal_threshold,
+  validation_metrics = val_metrics_df,  # All thresholds
+  validation_metrics_optimal = val_metrics_optimal,  # At optimal threshold (for Phase 5 comparison)
+  test_metrics = test_metrics,
+  test_scores = test_scores,
+  test_probabilities = test_prob_fraud
+)
+saveRDS(isolation_forest_results, file.path(paths$models, "isolation_forest_results.rds"))
+
+# Save comparison table
+if (exists("full_comparison")) {
+  readr::write_csv(full_comparison, file.path(paths$tables, "isolation_forest_comparison.csv"))
+}
+
+cat("=== Results Saved ===\n")
+cat("Model:", file.path(paths$models, "isolation_forest.rds"), "\n")
+cat("Results:", file.path(paths$models, "isolation_forest_results.rds"), "\n")
+if (exists("full_comparison")) {
+  cat("Comparison table:", file.path(paths$tables, "isolation_forest_comparison.csv"), "\n")
+}
+```
+
+## Summary
+
+- ✓ Implemented Isolation Forest for unsupervised fraud detection
+- ✓ Trained on normal transactions only (unsupervised approach)
+- ✓ Evaluated on validation and test sets
+- ✓ Compared performance with supervised models
+- ✓ Analyzed threshold trade-offs
+- ✓ Generated visualizations and metrics suitable for publication
+
+**Key Achievement**: Successfully integrated Isolation Forest as an alternative approach to supervised fraud detection, providing results that can be used in academic publication.
+
+**Next Step**: Results from this analysis can be incorporated into the Isolation Forest article, providing empirical validation of the methodology.

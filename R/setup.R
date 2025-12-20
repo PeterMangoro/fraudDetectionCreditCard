@@ -14,6 +14,7 @@ required_packages <- c(
   "ranger",          # Fast Random Forest
   "glmnet",          # Regularized regression for Logistic Regression tuning
   "dials",           # Parameter grids for tuning
+  "isotree",         # Isolation Forest for anomaly detection
   
   # Data manipulation
   "dplyr",           # Data manipulation
@@ -55,6 +56,7 @@ suppressPackageStartupMessages({
   library(ranger)
   library(glmnet)
   library(dials)
+  library(isotree)
   library(dplyr)
   library(readr)
   library(tidyr)
@@ -133,7 +135,7 @@ dir.create(paths$models, showWarnings = FALSE, recursive = TRUE)
 print_package_versions <- function() {
   cat("=== Package Versions ===\n")
   packages <- c("tidymodels", "themis", "yardstick", "vip", "DALEX", 
-                "xgboost", "ranger", "dplyr", "ggplot2")
+                "xgboost", "ranger", "dplyr", "ggplot2", "isotree")
   for (pkg in packages) {
     if (requireNamespace(pkg, quietly = TRUE)) {
       cat(sprintf("%-15s: %s\n", pkg, packageVersion(pkg)))

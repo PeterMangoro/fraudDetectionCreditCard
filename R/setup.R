@@ -12,6 +12,8 @@ required_packages <- c(
   "DALEX",           # Model explainability
   "xgboost",         # XGBoost implementation
   "ranger",          # Fast Random Forest
+  "glmnet",          # Regularized regression for Logistic Regression tuning
+  "dials",           # Parameter grids for tuning
   
   # Data manipulation
   "dplyr",           # Data manipulation
@@ -50,6 +52,8 @@ suppressPackageStartupMessages({
   library(DALEX)
   library(xgboost)
   library(ranger)
+  library(glmnet)
+  library(dials)
   library(dplyr)
   library(readr)
   library(tidyr)
